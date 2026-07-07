@@ -159,17 +159,56 @@ You can switch models in-session with `/model` or set any model from the list ab
 
 ### With Codex
 
+Start the proxy, then install a Codex profile from another terminal:
+
 ```bash
-export OPENAI_BASE_URL=http://localhost:8788
-export OPENAI_API_KEY=anything
-codex --model deepseek-v4-flash-free
+zen-proxy
 ```
 
-Or in `~/.codex/config.toml`:
+```bash
+./scripts/install-codex-profile.sh
+```
+
+This writes `~/.codex/zen-proxy.config.toml`. If zen-proxy is running, it also
+writes `~/.codex/model-catalogs/zen-proxy.json` so Codex has metadata for every
+model currently listed by the proxy.
+
+Manual equivalent:
 
 ```toml
 model = "deepseek-v4-flash-free"
+model_provider = "zen-proxy"
+model_context_window = 128000
+model_auto_compact_token_limit = 96000
+model_catalog_json = "/Users/you/.codex/model-catalogs/zen-proxy.json"
+
+[model_providers.zen-proxy]
+name = "zen-proxy"
+base_url = "http://127.0.0.1:8788/v1"
+wire_api = "responses"
 ```
+
+Start Codex with that profile:
+
+```bash
+codex --profile zen-proxy
+```
+
+To change models, keep the provider fixed and change only the model slug:
+
+```bash
+codex --profile zen-proxy -m mimo-v2.5-free
+codex --profile zen-proxy -m 'qwen/qwen3-coder:free'
+```
+
+Inside an active Codex session, use `/model` and enter any model supported by
+your selected upstream. zen-proxy passes the selected model through unchanged;
+if a provider-side model is temporarily unavailable, pick another model from
+the startup list.
+
+Do not use only `OPENAI_BASE_URL` for Codex. That leaves Codex on the built-in
+OpenAI provider path, where ChatGPT-account auth can reject non-OpenAI model
+names before the request reaches zen-proxy.
 
 ### With Cursor / Continue / any OpenAI-compatible tool
 

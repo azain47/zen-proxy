@@ -419,10 +419,7 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 		item := items[i]
 		switch item.Type {
 		case "message", "":
-			role := item.Role
-			if role == "" {
-				role = "user"
-			}
+			role := normalizeResponsesRole(item.Role)
 			content := extractResponsesContent(item)
 			messages = append(messages, ChatMessage{Role: role, Content: jsonStr(content)})
 
@@ -454,6 +451,19 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 		}
 	}
 	return messages
+}
+
+func normalizeResponsesRole(role string) string {
+	switch role {
+	case "system", "developer":
+		return "system"
+	case "assistant":
+		return "assistant"
+	case "user", "":
+		return "user"
+	default:
+		return "user"
+	}
 }
 
 func extractResponsesContent(item responsesInputItem) string {

@@ -33,6 +33,41 @@ func TestHandleCompletionsRejectsNullBody(t *testing.T) {
 	}
 }
 
+func TestHandleModelsIncludesOpenAIAndCodexShapes(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+
+	handleModels([]ModelInfo{{ID: "test-model", Object: "model", OwnedBy: "test", ContextLength: 64000}}).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&payload); err != nil {
+		t.Fatalf("failed to decode models response: %v", err)
+	}
+	if payload["object"] != "list" {
+		t.Fatalf("object = %v, want list", payload["object"])
+	}
+	if _, ok := payload["data"].([]any); !ok {
+		t.Fatalf("missing OpenAI data list: %#v", payload["data"])
+	}
+	models, ok := payload["models"].([]any)
+	if !ok {
+		t.Fatalf("missing Codex models list: %#v", payload["models"])
+	}
+	if len(models) != 1 {
+		t.Fatalf("Codex models = %d, want 1", len(models))
+	}
+	codexModel := models[0].(map[string]any)
+	if codexModel["slug"] != "test-model" {
+		t.Fatalf("Codex model slug = %v, want test-model", codexModel["slug"])
+	}
+	if codexModel["context_window"].(float64) != 64000 {
+		t.Fatalf("Codex context window = %v, want 64000", codexModel["context_window"])
+	}
+}
+
 func TestLoadConfigDefaultsToLocalhost(t *testing.T) {
 	t.Setenv("ZEN_HOST", "")
 	t.Setenv("ZEN_PORT", "")
@@ -190,6 +225,25 @@ func TestResponsesNonStreamingRejectsMissingChoices(t *testing.T) {
 
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadGateway)
+	}
+}
+
+func TestResponsesInputMapsDeveloperRoleToSystem(t *testing.T) {
+	req := responsesRequest{Input: json.RawMessage(`[
+		{"type":"message","role":"developer","content":"follow repo rules"},
+		{"type":"message","role":"user","content":"hi"}
+	]`)}
+
+	messages := translateResponsesInput(req)
+
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(messages))
+	}
+	if messages[0].Role != "system" {
+		t.Fatalf("first role = %q, want system", messages[0].Role)
+	}
+	if string(messages[0].Content) != `"follow repo rules"` {
+		t.Fatalf("first content = %s, want developer content", messages[0].Content)
 	}
 }
 

@@ -32,11 +32,12 @@ type Config struct {
 }
 
 type ModelInfo struct {
-	ID           string             `json:"id"`
-	Object       string             `json:"object"`
-	OwnedBy      string             `json:"owned_by"`
-	Pricing      *ModelPricing      `json:"pricing,omitempty"`
-	Architecture *ModelArchitecture `json:"architecture,omitempty"`
+	ID            string             `json:"id"`
+	Object        string             `json:"object"`
+	OwnedBy       string             `json:"owned_by"`
+	ContextLength int                `json:"context_length,omitempty"`
+	Pricing       *ModelPricing      `json:"pricing,omitempty"`
+	Architecture  *ModelArchitecture `json:"architecture,omitempty"`
 }
 
 type ModelPricing struct {
