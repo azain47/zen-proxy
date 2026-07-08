@@ -424,29 +424,29 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 			messages = append(messages, ChatMessage{Role: role, Content: jsonStr(content)})
 
 		case "function_call":
-			msg := ChatMessage{
-				Role:    "assistant",
-				Content: jsonStr(""),
-				ToolCalls: []ToolCall{{
-					ID:   item.CallID,
-					Type: "function",
-					Function: FunctionCall{
-						Name:      item.Name,
-						Arguments: item.Arguments,
-					},
-				}},
+			call := ToolCall{
+				ID:   item.CallID,
+				Type: "function",
+				Function: FunctionCall{
+					Name:      item.Name,
+					Arguments: item.Arguments,
+				},
 			}
-			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" && len(messages[len(messages)-1].ToolCalls) > 0 {
-				messages[len(messages)-1].ToolCalls = append(messages[len(messages)-1].ToolCalls, msg.ToolCalls[0])
+			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+				messages[len(messages)-1].ToolCalls = append(messages[len(messages)-1].ToolCalls, call)
 			} else {
-				messages = append(messages, msg)
+				messages = append(messages, ChatMessage{
+					Role:      "assistant",
+					Content:   jsonStr(""),
+					ToolCalls: []ToolCall{call},
+				})
 			}
 
 		case "function_call_output":
 			messages = append(messages, ChatMessage{
 				Role:       "tool",
 				ToolCallID: item.CallID,
-				Content:    jsonStr(item.Output),
+				Content:    jsonStr(extractResponsesOutput(item.Output)),
 			})
 		}
 	}
@@ -487,6 +487,27 @@ func extractResponsesContent(item responsesInputItem) string {
 	return string(item.Content)
 }
 
+func extractResponsesOutput(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []responsesContentPart
+	if json.Unmarshal(raw, &parts) == nil {
+		var texts []string
+		for _, p := range parts {
+			if p.Type == "output_text" || p.Type == "input_text" || p.Type == "text" {
+				texts = append(texts, p.Text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return string(raw)
+}
+
 func translateResponsesTools(tools []responsesTool) []ChatTool {
 	var result []ChatTool
 	for _, t := range tools {
@@ -520,7 +541,7 @@ type responsesInputItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
 }
 
 type responsesContentPart struct {
