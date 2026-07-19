@@ -18,11 +18,15 @@ func handleResponses(cfg Config) http.HandlerFunc {
 		}
 
 		model := effectiveModel(cfg, req.Model)
+		if cfg.Debugger != nil {
+			cfg.Debugger.SetRequest(r.Context(), "openai-responses", model)
+		}
 		messages := translateResponsesInput(req)
 		tools := translateResponsesTools(req.Tools)
 		stream := req.Stream
+		opts := responsesChatRequestOptions(req)
 
-		resp, err := upstreamRequest(cfg, model, messages, stream, tools)
+		resp, err := upstreamRequest(r.Context(), cfg, model, messages, stream, tools, opts)
 		if err != nil {
 			writeError(w, 502, "upstream error: "+err.Error())
 			return
@@ -421,7 +425,7 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 		case "message", "":
 			role := normalizeResponsesRole(item.Role)
 			content := extractResponsesContent(item)
-			messages = append(messages, ChatMessage{Role: role, Content: jsonStr(content)})
+			messages = append(messages, ChatMessage{Role: role, Content: content})
 
 		case "function_call":
 			call := ToolCall{
@@ -453,6 +457,15 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 	return messages
 }
 
+func normalizeReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "low", "medium", "high", "xhigh":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
+}
+
 func normalizeResponsesRole(role string) string {
 	switch role {
 	case "system", "developer":
@@ -466,25 +479,38 @@ func normalizeResponsesRole(role string) string {
 	}
 }
 
-func extractResponsesContent(item responsesInputItem) string {
+func extractResponsesContent(item responsesInputItem) json.RawMessage {
 	if item.Content == nil {
-		return ""
+		return jsonStr("")
 	}
 	var s string
 	if json.Unmarshal(item.Content, &s) == nil {
-		return s
+		return jsonStr(s)
 	}
 	var parts []responsesContentPart
 	if json.Unmarshal(item.Content, &parts) == nil {
-		var texts []string
+		var content []map[string]any
 		for _, p := range parts {
-			if p.Type == "input_text" || p.Type == "text" {
-				texts = append(texts, p.Text)
+			switch p.Type {
+			case "input_text", "output_text", "text":
+				content = append(content, map[string]any{"type": "text", "text": p.Text})
+			case "input_image":
+				if p.ImageURL != "" {
+					image := map[string]any{"url": p.ImageURL}
+					if p.Detail != "" {
+						image["detail"] = p.Detail
+					}
+					content = append(content, map[string]any{"type": "image_url", "image_url": image})
+				}
 			}
 		}
-		return strings.Join(texts, "\n")
+		if len(content) == 0 {
+			return jsonStr("")
+		}
+		raw, _ := json.Marshal(content)
+		return raw
 	}
-	return string(item.Content)
+	return item.Content
 }
 
 func extractResponsesOutput(raw json.RawMessage) string {
@@ -526,11 +552,36 @@ func translateResponsesTools(tools []responsesTool) []ChatTool {
 }
 
 type responsesRequest struct {
-	Model        string          `json:"model"`
-	Instructions string          `json:"instructions,omitempty"`
-	Input        json.RawMessage `json:"input"`
-	Stream       bool            `json:"stream"`
-	Tools        []responsesTool `json:"tools,omitempty"`
+	Model             string              `json:"model"`
+	Instructions      string              `json:"instructions,omitempty"`
+	Input             json.RawMessage     `json:"input"`
+	Stream            bool                `json:"stream"`
+	Tools             []responsesTool     `json:"tools,omitempty"`
+	Reasoning         *responsesReasoning `json:"reasoning,omitempty"`
+	MaxOutputTokens   int                 `json:"max_output_tokens,omitempty"`
+	Temperature       *float64            `json:"temperature,omitempty"`
+	TopP              *float64            `json:"top_p,omitempty"`
+	ToolChoice        json.RawMessage     `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool               `json:"parallel_tool_calls,omitempty"`
+}
+
+func responsesChatRequestOptions(req responsesRequest) chatRequestOptions {
+	effort := ""
+	if req.Reasoning != nil {
+		effort = normalizeReasoningEffort(req.Reasoning.Effort)
+	}
+	return chatRequestOptions{
+		MaxTokens:         req.MaxOutputTokens,
+		Temperature:       req.Temperature,
+		TopP:              req.TopP,
+		ToolChoice:        req.ToolChoice,
+		ParallelToolCalls: req.ParallelToolCalls,
+		ReasoningEffort:   effort,
+	}
+}
+
+type responsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type responsesInputItem struct {
@@ -545,8 +596,10 @@ type responsesInputItem struct {
 }
 
 type responsesContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 type responsesTool struct {

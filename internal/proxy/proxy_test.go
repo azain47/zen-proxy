@@ -37,7 +37,7 @@ func TestHandleModelsIncludesOpenAIAndCodexShapes(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rr := httptest.NewRecorder()
 
-	handleModels([]ModelInfo{{ID: "test-model", Object: "model", OwnedBy: "test", ContextLength: 64000}}).ServeHTTP(rr, req)
+	handleModels([]ModelInfo{{ID: "test-model", Object: "model", OwnedBy: "test", ContextLength: 64000}}, "test instructions").ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -66,6 +66,9 @@ func TestHandleModelsIncludesOpenAIAndCodexShapes(t *testing.T) {
 	if codexModel["context_window"].(float64) != 64000 {
 		t.Fatalf("Codex context window = %v, want 64000", codexModel["context_window"])
 	}
+	if codexModel["supports_reasoning_summaries"] != false || codexModel["supports_reasoning_summary_parameter"] != false {
+		t.Fatalf("Codex reasoning summary compatibility fields are missing: %#v", codexModel)
+	}
 }
 
 func TestLoadConfigDefaultsToLocalhost(t *testing.T) {
@@ -90,6 +93,52 @@ func TestLoadConfigAllowsHostOverride(t *testing.T) {
 
 	if cfg.Host != "0.0.0.0" {
 		t.Fatalf("host = %q, want 0.0.0.0", cfg.Host)
+	}
+}
+
+func TestLoadConfigDisablesRemoteMetadataAndCORSByDefault(t *testing.T) {
+	t.Setenv("ZEN_MODEL_METADATA_URL", "")
+	t.Setenv("ZEN_CORS_ORIGINS", "")
+
+	cfg := LoadConfig()
+
+	if cfg.ModelMetadataURL != "" {
+		t.Fatalf("metadata URL = %q, want disabled", cfg.ModelMetadataURL)
+	}
+	if len(cfg.CORSOrigins) != 0 {
+		t.Fatalf("CORS origins = %#v, want none", cfg.CORSOrigins)
+	}
+}
+
+func TestCORSRejectsBrowserOriginsUnlessAllowlisted(t *testing.T) {
+	handler := withCORS(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), []string{"https://allowed.example"})
+
+	blocked := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	blocked.Header.Set("Origin", "https://evil.example")
+	blockedRR := httptest.NewRecorder()
+	handler.ServeHTTP(blockedRR, blocked)
+	if blockedRR.Code != http.StatusForbidden {
+		t.Fatalf("blocked origin status = %d, want 403", blockedRR.Code)
+	}
+
+	allowed := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	allowed.Header.Set("Origin", "https://allowed.example")
+	allowedRR := httptest.NewRecorder()
+	handler.ServeHTTP(allowedRR, allowed)
+	if allowedRR.Code != http.StatusNoContent {
+		t.Fatalf("allowed origin status = %d, want 204", allowedRR.Code)
+	}
+	if got := allowedRR.Header().Get("Access-Control-Allow-Origin"); got != "https://allowed.example" {
+		t.Fatalf("allow origin header = %q", got)
+	}
+
+	cli := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	cliRR := httptest.NewRecorder()
+	handler.ServeHTTP(cliRR, cli)
+	if cliRR.Code != http.StatusNoContent {
+		t.Fatalf("CLI request status = %d, want 204", cliRR.Code)
 	}
 }
 
@@ -247,6 +296,29 @@ func TestResponsesInputMapsDeveloperRoleToSystem(t *testing.T) {
 	}
 }
 
+func TestResponsesInputPreservesAssistantOutputText(t *testing.T) {
+	req := responsesRequest{Input: json.RawMessage(`[
+		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+	]`)}
+
+	messages := translateResponsesInput(req)
+
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(messages))
+	}
+	if messages[0].Role != "assistant" || string(messages[0].Content) == "null" {
+		t.Fatalf("assistant message = %#v", messages[0])
+	}
+	var parts []responsesContentPart
+	if err := json.Unmarshal(messages[0].Content, &parts); err != nil {
+		t.Fatalf("decode assistant content: %v", err)
+	}
+	if len(parts) != 1 || parts[0].Type != "text" || parts[0].Text != "first answer" {
+		t.Fatalf("assistant content = %#v", parts)
+	}
+}
+
 func TestAnthropicUsesFallbackModelWhenRequestOmitsModel(t *testing.T) {
 	const fallbackModel = "fallback-model"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -256,6 +328,19 @@ func TestAnthropicUsesFallbackModelWhenRequestOmitsModel(t *testing.T) {
 		}
 		if payload["model"] != fallbackModel {
 			t.Fatalf("upstream model = %v, want %q", payload["model"], fallbackModel)
+		}
+		if payload["max_tokens"] != float64(32) || payload["temperature"] != 0.25 || payload["top_p"] != 0.8 {
+			t.Fatalf("generation controls were not preserved: %#v", payload)
+		}
+		if stop, ok := payload["stop"].([]any); !ok || len(stop) != 1 || stop[0] != "DONE" {
+			t.Fatalf("stop sequences were not preserved: %#v", payload["stop"])
+		}
+		choice, ok := payload["tool_choice"].(map[string]any)
+		if !ok || choice["type"] != "function" {
+			t.Fatalf("tool choice was not translated: %#v", payload["tool_choice"])
+		}
+		if payload["parallel_tool_calls"] != false {
+			t.Fatalf("parallel tool setting = %#v, want false", payload["parallel_tool_calls"])
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -271,7 +356,11 @@ func TestAnthropicUsesFallbackModelWhenRequestOmitsModel(t *testing.T) {
 	cfg := Config{Model: fallbackModel, Upstream: upstream.URL, APIKey: "test"}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"messages":[{"role":"user","content":"hi"}],
-		"max_tokens":32
+		"max_tokens":32,
+		"temperature":0.25,
+		"top_p":0.8,
+		"stop_sequences":["DONE"],
+		"tool_choice":{"type":"tool","name":"read_file","disable_parallel_tool_use":true}
 	}`))
 	rr := httptest.NewRecorder()
 
@@ -287,6 +376,51 @@ func TestAnthropicUsesFallbackModelWhenRequestOmitsModel(t *testing.T) {
 	}
 	if resp.Model != fallbackModel {
 		t.Fatalf("response model = %q, want %q", resp.Model, fallbackModel)
+	}
+}
+
+func TestResponsesPreservesControlsAndImages(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode upstream request: %v", err)
+		}
+		if payload["max_tokens"] != float64(77) || payload["temperature"] != 0.4 || payload["top_p"] != 0.9 {
+			t.Fatalf("Responses controls were not preserved: %#v", payload)
+		}
+		if payload["tool_choice"] != "auto" || payload["parallel_tool_calls"] != true {
+			t.Fatalf("Responses tool controls were not preserved: %#v", payload)
+		}
+		messages := payload["messages"].([]any)
+		user := messages[0].(map[string]any)
+		content := user["content"].([]any)
+		image := content[1].(map[string]any)
+		if image["type"] != "image_url" {
+			t.Fatalf("image content = %#v, want image_url", image)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"cmpl_1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Model: "test-model", Upstream: upstream.URL}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"test-model",
+		"input":[{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"describe"},
+			{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"low"}
+		]}],
+		"max_output_tokens":77,
+		"temperature":0.4,
+		"top_p":0.9,
+		"tool_choice":"auto",
+		"parallel_tool_calls":true
+	}`))
+	rr := httptest.NewRecorder()
+	handleResponses(cfg).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 	}
 }
 

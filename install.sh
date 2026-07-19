@@ -37,7 +37,9 @@ cleanup() {
 		rm -rf "$TMPDIR_ZEN_PROXY"
 	fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 detect_platform() {
 	case "$(uname -s)" in
@@ -71,6 +73,40 @@ download() {
 	fi
 }
 
+verify_checksum() {
+	FILE="$1"
+	ASSET_NAME="$2"
+	CHECKSUMS="${TMPDIR_ZEN_PROXY}/checksums.txt"
+
+	if [ ! -f "$CHECKSUMS" ]; then
+		if ! download "$(release_url checksums.txt)" "$CHECKSUMS" 2>/dev/null; then
+			warn "checksums.txt is unavailable; continuing without checksum verification"
+			return 0
+		fi
+	fi
+
+	EXPECTED="$(awk -v asset="$ASSET_NAME" '$2 == asset { print $1; exit }' "$CHECKSUMS")"
+	if [ -z "$EXPECTED" ]; then
+		warn "no published checksum for ${ASSET_NAME}; continuing without verification"
+		return 0
+	fi
+
+	if command -v sha256sum >/dev/null 2>&1; then
+		ACTUAL="$(sha256sum "$FILE" | awk '{ print $1 }')"
+	elif command -v shasum >/dev/null 2>&1; then
+		ACTUAL="$(shasum -a 256 "$FILE" | awk '{ print $1 }')"
+	else
+		warn "sha256sum or shasum is required for checksum verification; continuing without it"
+		return 0
+	fi
+
+	if [ "$ACTUAL" != "$EXPECTED" ]; then
+		warn "checksum mismatch for ${ASSET_NAME}"
+		return 1
+	fi
+	ok "verified checksum for ${ASSET_NAME}"
+}
+
 choose_bindir() {
 	USE_SUDO=0
 	if [ -n "$BINDIR" ]; then
@@ -99,12 +135,15 @@ choose_bindir() {
 install_binary() {
 	SRC="$1"
 	DEST="${BINDIR}/${PROJECT}"
+	TMP_DEST="${DEST}.tmp.$$"
 	if [ "$USE_SUDO" = "1" ]; then
-		sudo cp "$SRC" "$DEST"
-		sudo chmod 0755 "$DEST"
+		sudo cp "$SRC" "$TMP_DEST"
+		sudo chmod 0755 "$TMP_DEST"
+		sudo mv -f "$TMP_DEST" "$DEST"
 	else
-		cp "$SRC" "$DEST"
-		chmod 0755 "$DEST"
+		cp "$SRC" "$TMP_DEST"
+		chmod 0755 "$TMP_DEST"
+		mv -f "$TMP_DEST" "$DEST"
 	fi
 	ok "installed ${PROJECT} to ${DEST}"
 }
@@ -126,30 +165,38 @@ try_release_install() {
 
 	info "Trying release asset ${BOLD}${ASSET_TGZ}${NC}"
 	if download "$(release_url "$ASSET_TGZ")" "$ARCHIVE" 2>/dev/null; then
-		tar -xzf "$ARCHIVE" -C "$TMPDIR_ZEN_PROXY"
-		if [ -x "${TMPDIR_ZEN_PROXY}/${PROJECT}" ]; then
-			install_binary "${TMPDIR_ZEN_PROXY}/${PROJECT}"
-			return 0
-		fi
-		FOUND="$(find "$TMPDIR_ZEN_PROXY" -type f -name "$PROJECT" -perm -111 | head -1)"
-		if [ -n "$FOUND" ]; then
-			install_binary "$FOUND"
-			return 0
+		if verify_checksum "$ARCHIVE" "$ASSET_TGZ"; then
+			if tar -xzf "$ARCHIVE" -C "$TMPDIR_ZEN_PROXY"; then
+				if [ -x "${TMPDIR_ZEN_PROXY}/${PROJECT}" ]; then
+					install_binary "${TMPDIR_ZEN_PROXY}/${PROJECT}"
+					return 0
+				fi
+				FOUND="$(find "$TMPDIR_ZEN_PROXY" -type f -name "$PROJECT" -perm -111 | head -1)"
+				if [ -n "$FOUND" ]; then
+					install_binary "$FOUND"
+					return 0
+				fi
+				warn "release archive does not contain an executable ${PROJECT}"
+			else
+				warn "release archive is invalid"
+			fi
 		fi
 	fi
 
 	info "Trying release asset ${BOLD}${ASSET_BIN}${NC}"
 	if download "$(release_url "$ASSET_BIN")" "$RAWBIN" 2>/dev/null; then
-		chmod 0755 "$RAWBIN"
-		install_binary "$RAWBIN"
-		return 0
+		if verify_checksum "$RAWBIN" "$ASSET_BIN"; then
+			chmod 0755 "$RAWBIN"
+			install_binary "$RAWBIN"
+			return 0
+		fi
 	fi
 
 	return 1
 }
 
 build_from_source() {
-	[ -f go.mod ] || die "source install requires running from the ${PROJECT} repository"
+	[ -f go.mod ] && [ -f "${CMD_PATH}/main.go" ] || die "source install requires running from the ${PROJECT} repository"
 	command -v go >/dev/null 2>&1 || die "Go is required for source install"
 
 	BIN="${TMPDIR_ZEN_PROXY}/${PROJECT}"
@@ -181,23 +228,23 @@ go_install() {
 
 verify_install() {
 	CMD="${BINDIR}/${PROJECT}"
-	if [ -x "$CMD" ]; then
-		"$CMD" --version || true
-	else
-		warn "installed binary was not found at ${CMD}"
-	fi
+	[ -x "$CMD" ] || die "installed binary was not found at ${CMD}"
+	"$CMD" --version >/dev/null || die "installed binary failed its version check"
+	"$CMD" --version
 }
 
 main() {
 	detect_platform
-	find_download_tool
 	choose_bindir
 	TMPDIR_ZEN_PROXY="$(mktemp -d "${TMPDIR:-/tmp}/${PROJECT}.XXXXXX")"
 
 	if [ "$FROM_SOURCE" = "1" ]; then
 		build_from_source
-	elif ! try_release_install; then
-		if [ -f go.mod ]; then
+	else
+		find_download_tool
+		if try_release_install; then
+			:
+		elif [ -f go.mod ] && [ -f "${CMD_PATH}/main.go" ]; then
 			warn "release download failed; falling back to local source build"
 			build_from_source
 		elif go_install; then

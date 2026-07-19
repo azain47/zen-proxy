@@ -17,11 +17,15 @@ func handleAnthropic(cfg Config) http.HandlerFunc {
 		}
 
 		model := effectiveModel(cfg, req.Model)
+		if cfg.Debugger != nil {
+			cfg.Debugger.SetRequest(r.Context(), "anthropic-messages", model)
+		}
 		messages := translateAnthropicMessages(req)
 		tools := translateAnthropicTools(req.Tools)
 		stream := req.Stream
+		opts := anthropicChatRequestOptions(req)
 
-		resp, err := upstreamRequest(cfg, model, messages, stream, tools)
+		resp, err := upstreamRequest(r.Context(), cfg, model, messages, stream, tools, opts)
 		if err != nil {
 			writeError(w, 502, "upstream error: "+err.Error())
 			return
@@ -48,6 +52,9 @@ func handleTokenCount(cfg Config) http.HandlerFunc {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, 400, "invalid request body")
 			return
+		}
+		if cfg.Debugger != nil {
+			cfg.Debugger.SetRequest(r.Context(), "anthropic-token-count", effectiveModel(cfg, req.Model))
 		}
 		messages := translateAnthropicMessages(req)
 		estimate := 0
@@ -465,6 +472,22 @@ func buildAnthropicContent(msg CompletionMessage) []map[string]any {
 	return content
 }
 
+func anthropicReasoningEffort(t *anthropicThinking) string {
+	if t == nil || t.Type != "enabled" {
+		return ""
+	}
+	switch {
+	case t.BudgetTokens <= 0:
+		return ""
+	case t.BudgetTokens < 4000:
+		return "low"
+	case t.BudgetTokens < 16000:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
 func mapFinishReason(reason string) string {
 	switch reason {
 	case "stop":
@@ -516,12 +539,56 @@ func anthropicUsageFromChat(usage ChatUsage) anthropicUsage {
 }
 
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	System    json.RawMessage    `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
-	MaxTokens int                `json:"max_tokens"`
-	Stream    bool               `json:"stream"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
+	Model         string               `json:"model"`
+	System        json.RawMessage      `json:"system,omitempty"`
+	Messages      []anthropicMessage   `json:"messages"`
+	MaxTokens     int                  `json:"max_tokens"`
+	Stream        bool                 `json:"stream"`
+	Tools         []anthropicTool      `json:"tools,omitempty"`
+	Thinking      *anthropicThinking   `json:"thinking,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	TopP          *float64             `json:"top_p,omitempty"`
+	StopSequences []string             `json:"stop_sequences,omitempty"`
+	ToolChoice    *anthropicToolChoice `json:"tool_choice,omitempty"`
+}
+
+type anthropicToolChoice struct {
+	Type               string `json:"type"`
+	Name               string `json:"name,omitempty"`
+	DisableParallelUse bool   `json:"disable_parallel_tool_use,omitempty"`
+}
+
+func anthropicChatRequestOptions(req anthropicRequest) chatRequestOptions {
+	opts := chatRequestOptions{
+		MaxTokens:       req.MaxTokens,
+		Temperature:     req.Temperature,
+		TopP:            req.TopP,
+		Stop:            req.StopSequences,
+		ReasoningEffort: anthropicReasoningEffort(req.Thinking),
+	}
+	if req.ToolChoice == nil {
+		return opts
+	}
+	parallel := !req.ToolChoice.DisableParallelUse
+	opts.ParallelToolCalls = &parallel
+	switch req.ToolChoice.Type {
+	case "auto":
+		opts.ToolChoice = json.RawMessage(`"auto"`)
+	case "any":
+		opts.ToolChoice = json.RawMessage(`"required"`)
+	case "tool":
+		choice, _ := json.Marshal(map[string]any{
+			"type":     "function",
+			"function": map[string]string{"name": req.ToolChoice.Name},
+		})
+		opts.ToolChoice = choice
+	}
+	return opts
+}
+
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicMessage struct {

@@ -35,10 +35,13 @@ dist: clean
 		printf 'Building %s/%s\n' "$$os" "$$arch"; \
 		mkdir -p "$(DIST_DIR)/$${name}"; \
 		GOOS="$$os" GOARCH="$$arch" CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o "$$out" $(CMD); \
+		cp LICENSE THIRD_PARTY_NOTICES.md "$(DIST_DIR)/$${name}/"; \
+		mkdir -p "$(DIST_DIR)/$${name}/LICENSES"; \
+		cp LICENSES/Apache-2.0.txt "$(DIST_DIR)/$${name}/LICENSES/"; \
 		if [ "$$os" = "windows" ]; then \
-			(cd "$(DIST_DIR)/$${name}" && zip -q "../$${name}.zip" "$(BINARY).exe"); \
+			(cd "$(DIST_DIR)/$${name}" && zip -qr "../$${name}.zip" .); \
 		else \
-			tar -C "$(DIST_DIR)/$${name}" -czf "$(DIST_DIR)/$${name}.tar.gz" "$(BINARY)"; \
+			tar -C "$(DIST_DIR)/$${name}" -czf "$(DIST_DIR)/$${name}.tar.gz" .; \
 		fi; \
 		rm -rf "$(DIST_DIR)/$${name}"; \
 	done

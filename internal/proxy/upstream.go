@@ -3,14 +3,37 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
-func upstreamRequest(cfg Config, model string, messages []ChatMessage, stream bool, tools []ChatTool) (*http.Response, error) {
+var proxyHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
+
+type chatRequestOptions struct {
+	MaxTokens         int
+	Temperature       *float64
+	TopP              *float64
+	Stop              []string
+	ToolChoice        json.RawMessage
+	ParallelToolCalls *bool
+	ReasoningEffort   string
+}
+
+func upstreamRequest(ctx context.Context, cfg Config, model string, messages []ChatMessage, stream bool, tools []ChatTool, opts chatRequestOptions) (*http.Response, error) {
 	body := map[string]any{
 		"model":    effectiveModel(cfg, model),
 		"messages": messages,
@@ -19,16 +42,58 @@ func upstreamRequest(cfg Config, model string, messages []ChatMessage, stream bo
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
+	if opts.MaxTokens > 0 {
+		body["max_tokens"] = opts.MaxTokens
+	}
+	if opts.Temperature != nil {
+		body["temperature"] = *opts.Temperature
+	}
+	if opts.TopP != nil {
+		body["top_p"] = *opts.TopP
+	}
+	if len(opts.Stop) > 0 {
+		body["stop"] = opts.Stop
+	}
+	if len(opts.ToolChoice) > 0 && string(opts.ToolChoice) != "null" {
+		body["tool_choice"] = opts.ToolChoice
+	}
+	if opts.ParallelToolCalls != nil {
+		body["parallel_tool_calls"] = *opts.ParallelToolCalls
+	}
+	if opts.ReasoningEffort != "" {
+		body["reasoning_effort"] = opts.ReasoningEffort
+	}
 
 	payload, _ := json.Marshal(body)
-	req, err := http.NewRequest("POST", cfg.Upstream, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Upstream, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	setUpstreamHeaders(req, cfg)
 
-	return http.DefaultClient.Do(req)
+	return executeUpstream(ctx, cfg, req, payload)
+}
+
+func executeUpstream(ctx context.Context, cfg Config, req *http.Request, payload []byte) (*http.Response, error) {
+	if cfg.Debugger != nil {
+		cfg.Debugger.RecordUpstreamRequest(ctx, req, payload)
+	}
+
+	resp, err := proxyHTTPClient.Do(req)
+	if err != nil {
+		if cfg.Debugger != nil {
+			cfg.Debugger.RecordUpstreamError(ctx, err)
+		}
+		return nil, err
+	}
+	if cfg.Debugger != nil {
+		cfg.Debugger.RecordUpstreamResponse(ctx, resp)
+		resp.Body = newCaptureReadCloser(resp.Body, debugBodyLimit, func(body []byte, truncated bool) {
+			cfg.Debugger.RecordUpstreamBody(ctx, body, truncated)
+		})
+	}
+	return resp, nil
 }
 
 func setUpstreamHeaders(req *http.Request, cfg Config) {

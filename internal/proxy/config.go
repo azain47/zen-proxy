@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -20,15 +22,19 @@ const (
 )
 
 type Config struct {
-	Port        string
-	Host        string
-	Provider    string
-	Upstream    string
-	ModelsURL   string
-	APIKey      string
-	Model       string
-	HTTPReferer string
-	AppTitle    string
+	Port              string
+	Host              string
+	Provider          string
+	Upstream          string
+	ModelsURL         string
+	ModelMetadataURL  string
+	APIKey            string
+	Model             string
+	HTTPReferer       string
+	AppTitle          string
+	CORSOrigins       []string
+	CodexInstructions string
+	Debugger          *Debugger
 }
 
 type ModelInfo struct {
@@ -38,6 +44,7 @@ type ModelInfo struct {
 	ContextLength int                `json:"context_length,omitempty"`
 	Pricing       *ModelPricing      `json:"pricing,omitempty"`
 	Architecture  *ModelArchitecture `json:"architecture,omitempty"`
+	Capabilities  *ModelCapabilities `json:"-"`
 }
 
 type ModelPricing struct {
@@ -52,9 +59,11 @@ type ModelArchitecture struct {
 func LoadConfig() Config {
 	provider := normalizeProvider(envOr("ZEN_PROVIDER", providerZen))
 	cfg := Config{
-		Port:     envOr("ZEN_PORT", "8788"),
-		Host:     envOr("ZEN_HOST", "127.0.0.1"),
-		Provider: provider,
+		Port:             envOr("ZEN_PORT", "8788"),
+		Host:             envOr("ZEN_HOST", "127.0.0.1"),
+		Provider:         provider,
+		ModelMetadataURL: strings.TrimSpace(os.Getenv("ZEN_MODEL_METADATA_URL")),
+		CORSOrigins:      splitCommaList(os.Getenv("ZEN_CORS_ORIGINS")),
 	}
 
 	switch provider {
@@ -75,7 +84,22 @@ func LoadConfig() Config {
 		cfg.Model = envOr("ZEN_MODEL", "deepseek-v4-flash-free")
 	}
 
+	cfg.CodexInstructions = loadCodexInstructions()
+
 	return cfg
+}
+
+func loadCodexInstructions() string {
+	path := os.Getenv("ZEN_PROXY_CODEX_INSTRUCTIONS_FILE")
+	if path == "" {
+		return codexBaseInstructions
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("warning: could not read ZEN_PROXY_CODEX_INSTRUCTIONS_FILE=%q (%v); using embedded Codex prompt", path, err)
+		return codexBaseInstructions
+	}
+	return string(data)
 }
 
 func FetchModels(cfg Config) []ModelInfo {
@@ -91,7 +115,9 @@ func FetchModels(cfg Config) []ModelInfo {
 	}
 	setUpstreamHeaders(req, cfg)
 
-	resp, err := http.DefaultClient.Do(req)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := proxyHTTPClient.Do(req.WithContext(ctx))
 	if err != nil {
 		log.Printf("warning: failed to fetch models: %v", err)
 		return nil
@@ -225,4 +251,14 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func splitCommaList(value string) []string {
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }
