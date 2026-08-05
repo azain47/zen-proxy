@@ -402,6 +402,7 @@ func convertUserBlocks(blocks []anthropicContentBlock) []ChatMessage {
 
 func convertAssistantBlocks(blocks []anthropicContentBlock) []ChatMessage {
 	var textParts []string
+	var thinkingParts []string
 	var toolCalls []ToolCall
 
 	for _, b := range blocks {
@@ -409,7 +410,13 @@ func convertAssistantBlocks(blocks []anthropicContentBlock) []ChatMessage {
 		case "text":
 			textParts = append(textParts, b.Text)
 		case "thinking":
-			// Skip thinking blocks in conversation history
+			// Preserve reasoning so thinking-mode models (e.g. deepseek-v4)
+			// that require reasoning_content alongside tool_calls accept the
+			// message. The client echoes back the thinking we emitted from the
+			// upstream's reasoning_content, so this closes that round-trip.
+			if b.Thinking != "" {
+				thinkingParts = append(thinkingParts, b.Thinking)
+			}
 		case "tool_use":
 			args, _ := json.Marshal(b.Input)
 			toolCalls = append(toolCalls, ToolCall{
@@ -426,6 +433,9 @@ func convertAssistantBlocks(blocks []anthropicContentBlock) []ChatMessage {
 	msg := ChatMessage{
 		Role:    "assistant",
 		Content: jsonStr(strings.Join(textParts, "")),
+	}
+	if len(thinkingParts) > 0 {
+		msg.ReasoningContent = strings.Join(thinkingParts, "")
 	}
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
@@ -599,6 +609,7 @@ type anthropicMessage struct {
 type anthropicContentBlock struct {
 	Type       string          `json:"type"`
 	Text       string          `json:"text,omitempty"`
+	Thinking   string          `json:"thinking,omitempty"`
 	ID         string          `json:"id,omitempty"`
 	Name       string          `json:"name,omitempty"`
 	Input      any             `json:"input,omitempty"`

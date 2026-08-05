@@ -64,6 +64,20 @@ func responsesNonStreaming(w http.ResponseWriter, body io.Reader, model string) 
 
 	var output []any
 
+	// Emit the model's reasoning first so clients (e.g. Codex) can display it
+	// and, crucially, replay it on the next turn — thinking-mode models require
+	// reasoning_content to accompany the tool_calls they produced.
+	if msg.ReasoningContent != "" {
+		output = append(output, map[string]any{
+			"id":      "rs_" + completion.ID,
+			"type":    "reasoning",
+			"summary": []any{},
+			"content": []map[string]any{
+				{"type": "reasoning_text", "text": msg.ReasoningContent},
+			},
+		})
+	}
+
 	if msg.Content != "" {
 		output = append(output, map[string]any{
 			"id":     msgID,
@@ -110,6 +124,7 @@ func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
 	gotChunk := false
 	var outputText strings.Builder
 	var output []any
+	var currentReasoning *responsesStreamReasoningItem
 	var currentText *responsesStreamTextItem
 	toolItems := map[int]*responsesStreamToolItem{}
 	var toolOrder []int
@@ -181,7 +196,51 @@ func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
 		}
 	}
 
+	startReasoning := func() *responsesStreamReasoningItem {
+		if currentReasoning != nil {
+			return currentReasoning
+		}
+		currentReasoning = &responsesStreamReasoningItem{
+			ID:          "rs_proxy",
+			OutputIndex: nextOutputIndex,
+		}
+		nextOutputIndex++
+		writeSSE(w, "response.output_item.added", map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": currentReasoning.OutputIndex,
+			"item": map[string]any{
+				"id": currentReasoning.ID, "type": "reasoning",
+				"summary": []any{}, "content": []any{},
+			},
+		})
+		return currentReasoning
+	}
+
+	finishReasoning := func() {
+		if currentReasoning == nil || currentReasoning.Done {
+			return
+		}
+		text := currentReasoning.Text.String()
+		item := map[string]any{
+			"id":      currentReasoning.ID,
+			"type":    "reasoning",
+			"summary": []any{},
+			"content": []map[string]any{
+				{"type": "reasoning_text", "text": text},
+			},
+		}
+		writeSSE(w, "response.output_item.done", map[string]any{
+			"type":         "response.output_item.done",
+			"output_index": currentReasoning.OutputIndex,
+			"item":         item,
+		})
+		output = append(output, item)
+		currentReasoning.Done = true
+		currentReasoning = nil
+	}
+
 	startText := func() *responsesStreamTextItem {
+		finishReasoning()
 		finishTools()
 		if currentText != nil {
 			return currentText
@@ -216,6 +275,7 @@ func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
 	}
 
 	startTool := func(openAIIndex int, tc ToolCall) *responsesStreamToolItem {
+		finishReasoning()
 		finishText()
 		tool := toolItems[openAIIndex]
 		if tool != nil {
@@ -255,6 +315,18 @@ func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
 			return nil
 		}
 		delta := chunk.Choices[0].Delta
+
+		if delta.ReasoningContent != "" {
+			reasoning := startReasoning()
+			reasoning.Text.WriteString(delta.ReasoningContent)
+			writeSSE(w, "response.reasoning_text.delta", map[string]any{
+				"type":          "response.reasoning_text.delta",
+				"item_id":       reasoning.ID,
+				"output_index":  reasoning.OutputIndex,
+				"content_index": 0,
+				"delta":         delta.ReasoningContent,
+			})
+		}
 
 		if delta.Content != "" {
 			text := startText()
@@ -299,6 +371,7 @@ func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
 		return
 	}
 
+	finishReasoning()
 	finishText()
 	finishTools()
 
@@ -314,6 +387,13 @@ func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
 			"usage":       usage,
 		},
 	})
+}
+
+type responsesStreamReasoningItem struct {
+	ID          string
+	OutputIndex int
+	Text        strings.Builder
+	Done        bool
 }
 
 type responsesStreamTextItem struct {
@@ -419,13 +499,26 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 		return messages
 	}
 
+	// pendingReasoning holds a reasoning item's text until the assistant turn it
+	// belongs to is built, so thinking-mode models that require reasoning_content
+	// alongside tool_calls accept the replayed history.
+	pendingReasoning := ""
+
 	for i := 0; i < len(items); i++ {
 		item := items[i]
 		switch item.Type {
+		case "reasoning":
+			pendingReasoning = extractReasoningText(item)
+
 		case "message", "":
 			role := normalizeResponsesRole(item.Role)
 			content := extractResponsesContent(item)
-			messages = append(messages, ChatMessage{Role: role, Content: content})
+			msg := ChatMessage{Role: role, Content: content}
+			if role == "assistant" && pendingReasoning != "" {
+				msg.ReasoningContent = pendingReasoning
+			}
+			pendingReasoning = ""
+			messages = append(messages, msg)
 
 		case "function_call":
 			call := ToolCall{
@@ -437,16 +530,23 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 				},
 			}
 			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
-				messages[len(messages)-1].ToolCalls = append(messages[len(messages)-1].ToolCalls, call)
+				last := &messages[len(messages)-1]
+				last.ToolCalls = append(last.ToolCalls, call)
+				if pendingReasoning != "" && last.ReasoningContent == "" {
+					last.ReasoningContent = pendingReasoning
+				}
 			} else {
 				messages = append(messages, ChatMessage{
-					Role:      "assistant",
-					Content:   jsonStr(""),
-					ToolCalls: []ToolCall{call},
+					Role:             "assistant",
+					Content:          jsonStr(""),
+					ReasoningContent: pendingReasoning,
+					ToolCalls:        []ToolCall{call},
 				})
 			}
+			pendingReasoning = ""
 
 		case "function_call_output":
+			pendingReasoning = ""
 			messages = append(messages, ChatMessage{
 				Role:       "tool",
 				ToolCallID: item.CallID,
@@ -455,6 +555,36 @@ func translateResponsesInput(req responsesRequest) []ChatMessage {
 		}
 	}
 	return messages
+}
+
+// extractReasoningText pulls plaintext out of a Responses reasoning item,
+// preferring the full reasoning content and falling back to the summary.
+func extractReasoningText(item responsesInputItem) string {
+	if text := joinReasoningParts(item.Content); text != "" {
+		return text
+	}
+	return joinReasoningParts(item.Summary)
+}
+
+func joinReasoningParts(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []responsesContentPart
+	if json.Unmarshal(raw, &parts) == nil {
+		var texts []string
+		for _, p := range parts {
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+		return strings.Join(texts, "")
+	}
+	return ""
 }
 
 func normalizeReasoningEffort(effort string) string {
@@ -588,6 +718,7 @@ type responsesInputItem struct {
 	Type      string          `json:"type"`
 	Role      string          `json:"role,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+	Summary   json.RawMessage `json:"summary,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
