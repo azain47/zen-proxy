@@ -64,7 +64,7 @@ Installer environment variables:
 Build release artifacts for macOS, Linux, and Windows on both amd64 and arm64:
 
 ```bash
-make release VERSION=v0.2.0
+make release VERSION=v0.3.0
 ```
 
 Artifacts are written to `dist/`:
@@ -82,14 +82,20 @@ Each archive includes the project and third-party licenses. The release target
 also writes `dist/checksums.txt`. The installer looks for the macOS/Linux
 `.tar.gz` names above when installing from GitHub Releases.
 
-To publish a GitHub Release, push a version tag:
+Releases are cut from `main`. Because `main` is protected, land changes through a
+reviewed pull request first (CI must pass and the owner must approve), then create
+and push a version tag from an up-to-date `main`:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git switch main && git pull
+git tag -a v0.3.0 -m "zen-proxy v0.3.0"
+git push origin v0.3.0
 ```
 
-The release workflow builds the same artifacts and uploads them to the tagged release.
+Pushing a `v*` tag triggers the release workflow, which reruns the test suite, builds
+the artifacts above, and publishes them to a GitHub Release with generated notes.
+Published `v*` tags are protected from deletion and force-updates, so bump the patch
+or minor version to ship a fix instead of re-pushing an existing tag.
 
 ## Project Layout
 
