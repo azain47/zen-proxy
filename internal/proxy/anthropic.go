@@ -482,7 +482,16 @@ func buildAnthropicContent(msg CompletionMessage) []map[string]any {
 	return content
 }
 
-func anthropicReasoningEffort(t *anthropicThinking) string {
+func anthropicReasoningEffort(req anthropicRequest) string {
+	if req.OutputConfig != nil {
+		if effort := normalizeReasoningEffort(req.OutputConfig.Effort); effort != "" {
+			return effort
+		}
+	}
+	return anthropicThinkingReasoningEffort(req.Thinking)
+}
+
+func anthropicThinkingReasoningEffort(t *anthropicThinking) string {
 	if t == nil || t.Type != "enabled" {
 		return ""
 	}
@@ -549,17 +558,21 @@ func anthropicUsageFromChat(usage ChatUsage) anthropicUsage {
 }
 
 type anthropicRequest struct {
-	Model         string               `json:"model"`
-	System        json.RawMessage      `json:"system,omitempty"`
-	Messages      []anthropicMessage   `json:"messages"`
-	MaxTokens     int                  `json:"max_tokens"`
-	Stream        bool                 `json:"stream"`
-	Tools         []anthropicTool      `json:"tools,omitempty"`
-	Thinking      *anthropicThinking   `json:"thinking,omitempty"`
-	Temperature   *float64             `json:"temperature,omitempty"`
-	TopP          *float64             `json:"top_p,omitempty"`
-	StopSequences []string             `json:"stop_sequences,omitempty"`
-	ToolChoice    *anthropicToolChoice `json:"tool_choice,omitempty"`
+	Model         string                 `json:"model"`
+	System        json.RawMessage        `json:"system,omitempty"`
+	Messages      []anthropicMessage     `json:"messages"`
+	MaxTokens     int                    `json:"max_tokens"`
+	Stream        bool                   `json:"stream"`
+	Tools         []anthropicTool        `json:"tools,omitempty"`
+	Thinking      *anthropicThinking     `json:"thinking,omitempty"`
+	Temperature   *float64               `json:"temperature,omitempty"`
+	TopP          *float64               `json:"top_p,omitempty"`
+	StopSequences []string               `json:"stop_sequences,omitempty"`
+	ToolChoice    *anthropicToolChoice   `json:"tool_choice,omitempty"`
+	OutputConfig  *anthropicOutputConfig `json:"output_config,omitempty"`
+}
+type anthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type anthropicToolChoice struct {
@@ -574,7 +587,7 @@ func anthropicChatRequestOptions(req anthropicRequest) chatRequestOptions {
 		Temperature:     req.Temperature,
 		TopP:            req.TopP,
 		Stop:            req.StopSequences,
-		ReasoningEffort: anthropicReasoningEffort(req.Thinking),
+		ReasoningEffort: anthropicReasoningEffort(req),
 	}
 	if req.ToolChoice == nil {
 		return opts

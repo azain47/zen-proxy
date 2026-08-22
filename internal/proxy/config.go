@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -30,6 +31,7 @@ type Config struct {
 	ModelMetadataURL  string
 	APIKey            string
 	Model             string
+	ModelConfigured   bool
 	HTTPReferer       string
 	AppTitle          string
 	CORSOrigins       []string
@@ -83,6 +85,7 @@ func LoadConfig() Config {
 		cfg.APIKey = envOr("ZEN_API_KEY", "public")
 		cfg.Model = envOr("ZEN_MODEL", "deepseek-v4-flash-free")
 	}
+	cfg.ModelConfigured = strings.TrimSpace(os.Getenv("ZEN_MODEL")) != ""
 
 	cfg.CodexInstructions = loadCodexInstructions()
 
@@ -147,46 +150,94 @@ func FetchModels(cfg Config) []ModelInfo {
 	return result.Data
 }
 
-func PrintModels(models []ModelInfo) {
-	free := []string{}
-	other := []string{}
-	for _, m := range models {
-		if isFreeModel(m) {
-			free = append(free, m.ID)
-		} else {
-			other = append(other, m.ID)
+func resolveFallbackModel(cfg Config, models []ModelInfo) string {
+	if cfg.ModelConfigured || len(models) == 0 {
+		return cfg.Model
+	}
+	for _, model := range models {
+		if model.ID == cfg.Model {
+			return cfg.Model
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\n  Free models (%d):\n", len(free))
-	for _, id := range free {
-		fmt.Fprintf(os.Stderr, "    • %s\n", id)
+	candidate := firstCurrentFreeModel(models)
+	if candidate == "" && cfg.Provider != providerOpenRouter {
+		candidate = firstModelID(models)
 	}
-	fmt.Fprintf(os.Stderr, "\n  Other models (%d):\n", len(other))
-	for _, id := range other {
-		fmt.Fprintf(os.Stderr, "    • %s\n", id)
+	if candidate == "" {
+		log.Printf("warning: default model %q is not in the upstream model list; set ZEN_MODEL to a current model", cfg.Model)
+		return cfg.Model
 	}
-	fmt.Fprintf(os.Stderr, "\n")
+	log.Printf("warning: default model %q is not in the upstream model list; using current model %q", cfg.Model, candidate)
+	return candidate
 }
 
-func PrintProviderModels(cfg Config, models []ModelInfo) {
-	if cfg.Provider != providerOpenRouter {
-		PrintModels(models)
-		return
-	}
-
-	free := []string{}
-	for _, m := range models {
-		if isFreeModel(m) && hasTextOnlyOutput(m) {
-			free = append(free, m.ID)
+func firstCurrentFreeModel(models []ModelInfo) string {
+	for _, model := range models {
+		if model.ID != "" && isFreeModel(model) && hasTextOnlyOutput(model) {
+			return model.ID
 		}
 	}
+	return ""
+}
 
-	fmt.Fprintf(os.Stderr, "\n  Free OpenRouter text models (%d of %d fetched):\n", len(free), len(models))
-	for _, id := range free {
-		fmt.Fprintf(os.Stderr, "    • %s\n", id)
+func firstModelID(models []ModelInfo) string {
+	for _, model := range models {
+		if model.ID != "" {
+			return model.ID
+		}
 	}
-	fmt.Fprintf(os.Stderr, "\n")
+	return ""
+}
+
+type modelStats struct {
+	Total int
+	Free  int
+	Other int
+}
+
+func summarizeModels(provider string, models []ModelInfo) modelStats {
+	stats := modelStats{Total: len(models)}
+	for _, model := range models {
+		free := isFreeModel(model)
+		if provider == providerOpenRouter {
+			free = free && hasTextOnlyOutput(model)
+		}
+		if free {
+			stats.Free++
+		} else {
+			stats.Other++
+		}
+	}
+	return stats
+}
+
+func writeModelList(w io.Writer, provider string, models []ModelInfo) {
+	stats := summarizeModels(provider, models)
+	freeLabel := "Free"
+	if provider == providerOpenRouter {
+		freeLabel = "Free text"
+	}
+	fmt.Fprintf(w, "Models (%d)\n\n%s (%d)\n", stats.Total, freeLabel, stats.Free)
+	for _, model := range models {
+		free := isFreeModel(model)
+		if provider == providerOpenRouter {
+			free = free && hasTextOnlyOutput(model)
+		}
+		if model.ID != "" && free {
+			fmt.Fprintf(w, "  - %s\n", model.ID)
+		}
+	}
+	fmt.Fprintf(w, "\nOther (%d)\n", stats.Other)
+	for _, model := range models {
+		free := isFreeModel(model)
+		if provider == providerOpenRouter {
+			free = free && hasTextOnlyOutput(model)
+		}
+		if model.ID != "" && !free {
+			fmt.Fprintf(w, "  - %s\n", model.ID)
+		}
+	}
 }
 
 func isFreeModel(m ModelInfo) bool {

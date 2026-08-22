@@ -16,10 +16,7 @@ import (
 	"time"
 )
 
-const (
-	debugHistoryLimit = 100
-	debugBodyLimit    = 128 * 1024
-)
+const debugHistoryLimit = 100
 
 type traceContextKey struct{}
 
@@ -304,23 +301,22 @@ func sanitizeHeadersMap(headers map[string]string) map[string]string {
 }
 
 func sanitizeBody(body []byte, alreadyTruncated bool) (string, bool) {
-	truncated := alreadyTruncated
-	if len(body) > debugBodyLimit {
-		body = body[:debugBodyLimit]
-		truncated = true
-	}
 	if len(body) == 0 {
-		return "", truncated
+		return "", alreadyTruncated
 	}
 
 	var value any
 	if err := json.Unmarshal(body, &value); err == nil {
 		redactJSON(value)
-		if pretty, err := json.MarshalIndent(value, "", "  "); err == nil {
-			return string(pretty), truncated
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(value); err == nil {
+			return strings.TrimRight(buf.String(), "\n"), alreadyTruncated
 		}
 	}
-	return string(body), truncated
+	return string(body), alreadyTruncated
 }
 
 func redactJSON(value any) {
@@ -394,6 +390,10 @@ func (r *captureReadCloser) Close() error {
 }
 
 func (r *captureReadCloser) capture(data []byte) {
+	if r.limit <= 0 {
+		r.buffer.Write(data)
+		return
+	}
 	remaining := r.limit - r.buffer.Len()
 	if remaining <= 0 {
 		r.truncated = true
@@ -416,7 +416,7 @@ type traceResponseWriter struct {
 func newTraceResponseWriter(writer http.ResponseWriter) *traceResponseWriter {
 	return &traceResponseWriter{
 		ResponseWriter: writer,
-		capture:        newCaptureReadCloser(io.NopCloser(strings.NewReader("")), debugBodyLimit, nil),
+		capture:        newCaptureReadCloser(io.NopCloser(strings.NewReader("")), 0, nil),
 	}
 }
 
@@ -464,7 +464,7 @@ func withDebug(next http.Handler, debugger *Debugger) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, id := debugger.Begin(r)
-		capture := newCaptureReadCloser(r.Body, debugBodyLimit, nil)
+		capture := newCaptureReadCloser(r.Body, 0, nil)
 		r = r.WithContext(ctx)
 		r.Body = capture
 		response := newTraceResponseWriter(w)

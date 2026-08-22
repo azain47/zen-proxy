@@ -8,6 +8,7 @@ CMD_PATH="cmd/${PROJECT}"
 VERSION="${ZEN_PROXY_VERSION:-latest}"
 BINDIR="${ZEN_PROXY_BINDIR:-}"
 FROM_SOURCE="${ZEN_PROXY_FROM_SOURCE:-}"
+CHECK_UPDATE=0
 GITHUB="https://github.com/${REPO}"
 
 if [ -t 1 ]; then
@@ -30,6 +31,19 @@ warn() { printf '%sWARN%s %s\n' "$YELLOW" "$NC" "$*"; }
 die() {
 	printf '%sERR%s %s\n' "$RED" "$NC" "$*" >&2
 	exit 1
+}
+
+parse_args() {
+	case "$#" in
+	0) ;;
+	1)
+		case "$1" in
+		--check-update) CHECK_UPDATE=1 ;;
+		*) die "usage: $0 [--check-update]" ;;
+		esac
+		;;
+	*) die "usage: $0 [--check-update]" ;;
+	esac
 }
 
 cleanup() {
@@ -71,6 +85,68 @@ download() {
 	else
 		wget -q -O "$2" "$1"
 	fi
+}
+
+latest_release_version() {
+	LATEST_JSON="${TMPDIR_ZEN_PROXY}/latest-release.json"
+	if ! download "https://api.github.com/repos/${REPO}/releases/latest" "$LATEST_JSON"; then
+		return 1
+	fi
+	awk -F '"' '/"tag_name"[[:space:]]*:/ { print $4; exit }' "$LATEST_JSON"
+}
+
+normalize_version() {
+	printf '%s\n' "$1" | sed 's/^[vV]//'
+}
+
+find_installed_binary() {
+	if [ -n "$BINDIR" ]; then
+		CANDIDATE="${BINDIR}/${PROJECT}"
+		[ -x "$CANDIDATE" ] || return 1
+		printf '%s\n' "$CANDIDATE"
+		return 0
+	fi
+
+	if CANDIDATE="$(command -v "$PROJECT" 2>/dev/null)" && [ -x "$CANDIDATE" ]; then
+		printf '%s\n' "$CANDIDATE"
+		return 0
+	fi
+
+	for CANDIDATE in "/usr/local/bin/${PROJECT}" "${HOME}/.local/bin/${PROJECT}"; do
+		if [ -x "$CANDIDATE" ]; then
+			printf '%s\n' "$CANDIDATE"
+			return 0
+		fi
+	done
+	return 1
+}
+
+check_update() {
+	if ! INSTALLED="$(find_installed_binary)"; then
+		die "installed binary ${PROJECT} was not found; set ZEN_PROXY_BINDIR to its directory"
+	fi
+	if ! CURRENT_OUTPUT="$("$INSTALLED" --version 2>/dev/null)"; then
+		die "installed binary failed its version check"
+	fi
+	CURRENT="$(printf '%s\n' "$CURRENT_OUTPUT" | awk 'NR == 1 { print $2; exit }')"
+	[ -n "$CURRENT" ] || die "could not parse installed ${PROJECT} version"
+	if ! LATEST="$(latest_release_version)"; then
+		die "could not fetch the latest release for ${REPO}"
+	fi
+	[ -n "$LATEST" ] || die "latest release did not include a version tag"
+
+	CURRENT_NORMALIZED="$(normalize_version "$CURRENT")"
+	LATEST_NORMALIZED="$(normalize_version "$LATEST")"
+	if [ "$CURRENT_NORMALIZED" = "$LATEST_NORMALIZED" ] && [ "$CURRENT_NORMALIZED" != "dev" ] && [ "$CURRENT_NORMALIZED" != "latest" ]; then
+		ok "${PROJECT} ${CURRENT} is up to date (latest ${LATEST})"
+		return 0
+	fi
+	if [ "$CURRENT_NORMALIZED" = "dev" ] || [ "$CURRENT_NORMALIZED" = "latest" ] || [ -z "$CURRENT_NORMALIZED" ]; then
+		warn "${PROJECT} ${CURRENT} is a development build; latest release is ${LATEST}"
+	else
+		warn "${PROJECT} ${CURRENT} does not match the latest release ${LATEST}"
+	fi
+	return 1
 }
 
 verify_checksum() {
@@ -234,10 +310,17 @@ verify_install() {
 }
 
 main() {
+	parse_args "$@"
+	if [ "$CHECK_UPDATE" = "1" ]; then
+		find_download_tool
+		TMPDIR_ZEN_PROXY="$(mktemp -d "${TMPDIR:-/tmp}/${PROJECT}.XXXXXX")"
+		check_update
+		return
+	fi
+
 	detect_platform
 	choose_bindir
 	TMPDIR_ZEN_PROXY="$(mktemp -d "${TMPDIR:-/tmp}/${PROJECT}.XXXXXX")"
-
 	if [ "$FROM_SOURCE" = "1" ]; then
 		build_from_source
 	else

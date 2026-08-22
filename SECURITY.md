@@ -10,10 +10,12 @@ not authenticate incoming local requests.
 Provider API keys are forwarded to the configured upstream provider using the
 standard authorization header. Normal mode does not intentionally store request
 bodies, responses, or API keys. `--verbose`, `--debug`, and `--tui` retain the
-latest 100 request traces in process memory, with each payload preview capped at
-128 KiB. Authorization headers and JSON fields that look like keys, tokens, or
-secrets are redacted. Prompt text and tool output remain visible and may contain
-secrets of their own, so enable inspection modes only in a trusted terminal.
+latest 100 complete request traces in process memory. Large prompts, tool
+results, or responses can therefore increase process memory substantially while
+inspection is enabled. Authorization headers and JSON fields that look like
+keys, tokens, or secrets are redacted. Prompt text and tool output remain
+visible and may contain secrets of their own, so enable inspection modes only
+in a trusted terminal.
 
 The inspector never writes traces to disk. Redirecting verbose output to a file
 is an operator action and should be treated as storing potentially sensitive

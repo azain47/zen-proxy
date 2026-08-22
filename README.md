@@ -23,6 +23,15 @@ The installer downloads a prebuilt release asset when available, installs the
 building from source when run inside a checkout. Published SHA-256 checksums
 are verified when `sha256sum` or `shasum` is available.
 
+Check the installed binary against the latest GitHub release without
+reinstalling it:
+
+```bash
+./install.sh --check-update
+```
+
+The check exits successfully when the installed release matches the latest tag.
+
 ```bash
 go install github.com/azain47/zen-proxy/cmd/zen-proxy@latest
 ```
@@ -47,7 +56,7 @@ Installer environment variables:
 |---------|-------------|
 | `ZEN_PROXY_VERSION` | Release tag to install (default: `latest`) |
 | `ZEN_PROXY_BINDIR` | Install directory override |
-| `ZEN_PROXY_REPO` | GitHub repo override, e.g. `owner/zen-proxy` |
+| `ZEN_PROXY_REPO` | GitHub owner/repository for installation and update checks, e.g. `owner/zen-proxy` |
 | `ZEN_PROXY_FROM_SOURCE=1` | Force local source build and install |
 
 ## Release Builds
@@ -97,37 +106,52 @@ install.sh          standalone installer
 ./zen-proxy
 ```
 
+Inspect the installed version or current model catalog:
+
+```bash
+zen-proxy --version
+zen-proxy --check-update
+zen-proxy models
+```
+
 For a live request inspector, start the proxy with:
 
 ```bash
 zen-proxy --tui
 ```
 
-The dashboard keeps the latest 100 requests in memory and provides separate
-views for the inbound client request, translated upstream request, raw upstream
-response, and response returned to the client. Use `j`/`k` to select requests,
-arrow keys or the mouse wheel for line scrolling, Page Up/Page Down or
-`Ctrl+U`/`Ctrl+D` for page scrolling, Home/End to jump, `1`-`4` to select a
-view, and `q` to stop the dashboard and proxy. For headless debugging,
-`zen-proxy --verbose` (or `--debug`) prints the same sanitized traces to stderr.
+The dashboard keeps the latest 100 requests in memory and shows each request's
+inbound payload, translated upstream request, upstream response, and response
+to the client. JSON bodies are shown as an ordered, collapsible tree with
+syntax-colored keys and values; word wrapping is enabled by default. Use
+Up/Down to move through JSON nodes, Left/Right or Enter to collapse/expand
+objects and arrays, and `w` to toggle word wrapping. With wrapping off,
+`h`/`l` or Left/Right pan long lines and `0` resets the JSON column.
+Statuses remain explicit without color (`[WAIT]`, `[OK]`, `[WARN]`,
+`[ERR]`). Use `j`/`k` or `n`/`p` to select requests, Tab/Shift-Tab or
+`[`/`]` to change views, `y` to copy the selected JSON node, `c` to
+copy the current panel, or `Y` to copy the complete trace as Markdown through OSC 52.
+Number keys `1`-`4`, Page Up/Page Down, `Ctrl+U`/`Ctrl+D`, and Home/End remain available.
+The mouse also works: the wheel scrolls the detail panel, clicking a request in
+the list selects it, clicking a tab in the detail header switches views, and
+clicking a JSON node folds/unfolds and selects it. Drag across any text to
+select a rectangular region; releasing the button auto-copies it to the
+clipboard via OSC 52.
+`--no-color`, `NO_COLOR`, and `TERM=dumb` disable dashboard colors. For
+headless debugging, `zen-proxy --verbose` (or `--debug`) prints the same
+sanitized traces to stderr.
 
-By default, the proxy uses OpenCode Zen. On startup, it fetches and displays the
-available models. The model names and counts are controlled by the upstream and
-change over time; startup output has this form:
+By default, the proxy prints a compact startup summary instead of dumping every
+model ID. Use `zen-proxy models` when you need the current catalog. Startup
+output has this form:
 
 ```
-zen-proxy → https://opencode.ai/zen/v1/chat/completions (provider: zen, default model: deepseek-v4-flash-free)
-fetched <count> models from upstream
-
-  Free models (<count>):
-    • <model-id>
-    ...
-
-  Other models (<count>):
-    • <model-id>
-    ...
-
-listening on 127.0.0.1:8788
+zen-proxy v0.2.1
+  ready    http://127.0.0.1:8788
+  route    zen -> https://opencode.ai/zen/v1/chat/completions
+  model    deepseek-v4-flash-free
+  catalog  <count> models (<free> free, <other> other)
+  inspect  zen-proxy --tui
 ```
 
 ### With OpenRouter
@@ -282,7 +306,11 @@ names before the request reaches zen-proxy.
 | `ZEN_PROXY_CODEX_INSTRUCTIONS_FILE` | unset | Path to a file whose contents replace Codex's built-in agent prompt in every `/v1/models` entry. See [Custom Codex agent instructions](#custom-codex-agent-instructions). |
 
 The proxy passes through whatever model name the client sends. `ZEN_MODEL` is
-only used as a fallback.
+only used as a fallback. When the built-in fallback is missing from the fetched
+model list, Zen selects a current upstream model and OpenRouter selects a
+current free text model. An explicit `ZEN_MODEL` value is never replaced; if no
+safe replacement is available, the configured default is retained with a
+warning.
 When `ZEN_MODEL_METADATA_URL` is configured, provider model data is enriched
 from that LiteLLM-compatible catalog. Provider-reported context windows take
 precedence; the catalog fills missing context windows and known reasoning,
@@ -290,8 +318,10 @@ parallel-tool, and vision capabilities. If the catalog is unavailable or has
 no matching entry,
 the proxy exposes conservative `low`, `medium`, and `high` reasoning controls
 but otherwise avoids guessing model capabilities. Providers may ignore a
-reasoning effort for models that do not implement one. A
-mutable hosted catalog is intentionally not enabled by default.
+reasoning effort for models that do not implement one.
+For Anthropic Messages, `output_config.effort` is forwarded as the upstream
+`reasoning_effort`; enabled thinking budgets remain a fallback mapping.
+A mutable hosted catalog is intentionally not enabled by default.
 
 For example, to opt into LiteLLM's staging catalog explicitly:
 

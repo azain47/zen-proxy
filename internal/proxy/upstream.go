@@ -64,7 +64,7 @@ func upstreamRequest(ctx context.Context, cfg Config, model string, messages []C
 		body["reasoning_effort"] = opts.ReasoningEffort
 	}
 
-	payload, _ := json.Marshal(body)
+	payload := marshalNoEscape(body)
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Upstream, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -89,7 +89,7 @@ func executeUpstream(ctx context.Context, cfg Config, req *http.Request, payload
 	}
 	if cfg.Debugger != nil {
 		cfg.Debugger.RecordUpstreamResponse(ctx, resp)
-		resp.Body = newCaptureReadCloser(resp.Body, debugBodyLimit, func(body []byte, truncated bool) {
+		resp.Body = newCaptureReadCloser(resp.Body, 0, func(body []byte, truncated bool) {
 			cfg.Debugger.RecordUpstreamBody(ctx, body, truncated)
 		})
 	}
@@ -193,8 +193,18 @@ func streamError(data string) error {
 	return fmt.Errorf("upstream stream error: %s", payload.Error)
 }
 
+func marshalNoEscape(value any) []byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		return nil
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n")
+}
+
 func writeSSE(w http.ResponseWriter, event string, data any) {
-	payload, _ := json.Marshal(data)
+	payload := marshalNoEscape(data)
 	if event != "" {
 		fmt.Fprintf(w, "event: %s\n", event)
 	}
