@@ -175,6 +175,9 @@ func jsonNodeDepth(node *jsonTreeNode) int {
 }
 
 func (m dashboardModel) currentPayload() (TracePayload, bool) {
+	if m.showModels {
+		return TracePayload{}, false
+	}
 	trace, ok := m.selectedTrace()
 	if !ok {
 		return TracePayload{}, false

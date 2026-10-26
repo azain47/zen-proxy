@@ -18,6 +18,9 @@ const (
 	providerOpenRouter = "openrouter"
 
 	defaultZenUpstream        = "https://opencode.ai/zen/v1/chat/completions"
+	defaultZenModelsURL       = "https://opencode.ai/zen/v1/models"
+	defaultZenMetadataURL     = "https://models.opencode.ai/api.json"
+	defaultZenModel           = "deepseek-v4.1-flash-free"
 	defaultOpenRouterUpstream = "https://openrouter.ai/api/v1/chat/completions"
 	defaultOpenRouterModels   = "https://openrouter.ai/api/v1/models"
 )
@@ -36,6 +39,10 @@ type Config struct {
 	AppTitle          string
 	CORSOrigins       []string
 	CodexInstructions string
+	FreeTierClient    bool
+	OpenCodeVersion   string
+	UpstreamTransport string
+	BunPath           string
 	Debugger          *Debugger
 }
 
@@ -61,17 +68,17 @@ type ModelArchitecture struct {
 func LoadConfig() Config {
 	provider := normalizeProvider(envOr("ZEN_PROVIDER", providerZen))
 	cfg := Config{
-		Port:             envOr("ZEN_PORT", "8788"),
-		Host:             envOr("ZEN_HOST", "127.0.0.1"),
-		Provider:         provider,
-		ModelMetadataURL: strings.TrimSpace(os.Getenv("ZEN_MODEL_METADATA_URL")),
-		CORSOrigins:      splitCommaList(os.Getenv("ZEN_CORS_ORIGINS")),
+		Port:        envOr("ZEN_PORT", "8788"),
+		Host:        envOr("ZEN_HOST", "127.0.0.1"),
+		Provider:    provider,
+		CORSOrigins: splitCommaList(os.Getenv("ZEN_CORS_ORIGINS")),
 	}
 
 	switch provider {
 	case providerOpenRouter:
 		cfg.Upstream = envOr("ZEN_UPSTREAM", defaultOpenRouterUpstream)
 		cfg.ModelsURL = envOr("ZEN_MODELS_URL", defaultOpenRouterModels)
+		cfg.ModelMetadataURL = strings.TrimSpace(os.Getenv("ZEN_MODEL_METADATA_URL"))
 		cfg.APIKey = envFirst("ZEN_API_KEY", "OPENROUTER_API_KEY")
 		cfg.Model = envOr("ZEN_MODEL", "openrouter/free")
 		cfg.HTTPReferer = envFirst("OPENROUTER_HTTP_REFERER", "ZEN_HTTP_REFERER")
@@ -81,15 +88,32 @@ func LoadConfig() Config {
 		}
 	default:
 		cfg.Upstream = envOr("ZEN_UPSTREAM", defaultZenUpstream)
-		cfg.ModelsURL = envOr("ZEN_MODELS_URL", "")
+		cfg.ModelsURL = envOr("ZEN_MODELS_URL", defaultZenModelsURL)
+		cfg.ModelMetadataURL = strings.TrimSpace(envOr("ZEN_MODEL_METADATA_URL", defaultZenMetadataURL))
 		cfg.APIKey = envOr("ZEN_API_KEY", "public")
-		cfg.Model = envOr("ZEN_MODEL", "deepseek-v4-flash-free")
+		cfg.Model = envOr("ZEN_MODEL", defaultZenModel)
+		cfg.OpenCodeVersion = envOr("ZEN_OPENCODE_VERSION", "1.19.4")
+		cfg.UpstreamTransport = envOr("ZEN_UPSTREAM_TRANSPORT", "auto")
+		cfg.BunPath = strings.TrimSpace(os.Getenv("ZEN_BUN_PATH"))
+		cfg.FreeTierClient = freeTierClientEnabled(cfg.APIKey)
 	}
 	cfg.ModelConfigured = strings.TrimSpace(os.Getenv("ZEN_MODEL")) != ""
 
 	cfg.CodexInstructions = loadCodexInstructions()
 
 	return cfg
+}
+
+// freeTierClientEnabled reports whether the proxy should present itself as
+// the OpenCode client. Zen's free tier only accepts requests that carry the
+// OpenCode client identity (User-Agent + x-opencode-session), so the keyless
+// preset enables it; a real ZEN_API_KEY disables it because paid models do
+// not require the client gate.
+func freeTierClientEnabled(apiKey string) bool {
+	if strings.TrimSpace(os.Getenv("ZEN_FREE_TIER_CLIENT")) != "" {
+		return envBool("ZEN_FREE_TIER_CLIENT")
+	}
+	return apiKey == "" || apiKey == "public"
 }
 
 func loadCodexInstructions() string {

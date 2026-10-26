@@ -96,17 +96,26 @@ func TestLoadConfigAllowsHostOverride(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDisablesRemoteMetadataAndCORSByDefault(t *testing.T) {
+func TestLoadConfigEnablesRemoteMetadataByDefaultAndAllowsOptOut(t *testing.T) {
 	t.Setenv("ZEN_MODEL_METADATA_URL", "")
 	t.Setenv("ZEN_CORS_ORIGINS", "")
 
 	cfg := LoadConfig()
 
-	if cfg.ModelMetadataURL != "" {
-		t.Fatalf("metadata URL = %q, want disabled", cfg.ModelMetadataURL)
+	if cfg.ModelMetadataURL != "https://models.opencode.ai/api.json" {
+		t.Fatalf("metadata URL = %q, want the OpenCode catalog", cfg.ModelMetadataURL)
 	}
 	if len(cfg.CORSOrigins) != 0 {
 		t.Fatalf("CORS origins = %#v, want none", cfg.CORSOrigins)
+	}
+
+	t.Setenv("ZEN_MODEL_METADATA_URL", "off")
+	cfg = LoadConfig()
+	if cfg.ModelMetadataURL != "off" {
+		t.Fatalf("metadata URL = %q, want preserved off sentinel", cfg.ModelMetadataURL)
+	}
+	if got := FetchModelMetadata(cfg); got != nil {
+		t.Fatalf("FetchModelMetadata with off = %#v, want nil", got)
 	}
 }
 
@@ -260,7 +269,7 @@ func TestTextOnlyOutputFilter(t *testing.T) {
 func TestAnthropicNonStreamingRejectsMissingChoices(t *testing.T) {
 	rr := httptest.NewRecorder()
 
-	anthropicNonStreaming(rr, strings.NewReader(`{"id":"cmpl_1","choices":[]}`), "fallback-model")
+	anthropicNonStreaming(rr, strings.NewReader(`{"id":"cmpl_1","choices":[]}`), "fallback-model", nil)
 
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadGateway)
@@ -270,7 +279,7 @@ func TestAnthropicNonStreamingRejectsMissingChoices(t *testing.T) {
 func TestResponsesNonStreamingRejectsMissingChoices(t *testing.T) {
 	rr := httptest.NewRecorder()
 
-	responsesNonStreaming(rr, strings.NewReader(`{"id":"cmpl_1","choices":[]}`), "fallback-model")
+	responsesNonStreaming(rr, strings.NewReader(`{"id":"cmpl_1","choices":[]}`), "fallback-model", nil)
 
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadGateway)
@@ -434,7 +443,7 @@ func TestAnthropicStreamingHandlesMultipleToolCalls(t *testing.T) {
 	}, "\n\n"))
 	rr := httptest.NewRecorder()
 
-	anthropicStreaming(rr, body, "test-model")
+	anthropicStreaming(rr, body, "test-model", nil)
 
 	out := rr.Body.String()
 	if strings.Count(out, `"type":"tool_use"`) != 2 {
@@ -464,7 +473,7 @@ func TestResponsesStreamingHandlesMultipleToolCalls(t *testing.T) {
 	}, "\n\n"))
 	rr := httptest.NewRecorder()
 
-	responsesStreaming(rr, body, "test-model")
+	responsesStreaming(rr, body, "test-model", nil)
 
 	out := rr.Body.String()
 	if strings.Count(out, `"type":"function_call"`) != 6 {
@@ -485,7 +494,7 @@ func TestStreamingPropagatesUpstreamErrorEvents(t *testing.T) {
 	body := strings.NewReader(`data: {"error":{"type":"rate_limit_error","message":"slow down"}}` + "\n\n")
 	rr := httptest.NewRecorder()
 
-	responsesStreaming(rr, body, "test-model")
+	responsesStreaming(rr, body, "test-model", nil)
 
 	out := rr.Body.String()
 	if !strings.Contains(out, `event: response.failed`) {
@@ -513,7 +522,7 @@ func TestTranslatedUsagePreservesCacheDetails(t *testing.T) {
 	}`
 
 	anthropicRR := httptest.NewRecorder()
-	anthropicNonStreaming(anthropicRR, strings.NewReader(completion), "fallback-model")
+	anthropicNonStreaming(anthropicRR, strings.NewReader(completion), "fallback-model", nil)
 	if anthropicRR.Code != http.StatusOK {
 		t.Fatalf("anthropic status = %d, body = %s", anthropicRR.Code, anthropicRR.Body.String())
 	}
@@ -530,7 +539,7 @@ func TestTranslatedUsagePreservesCacheDetails(t *testing.T) {
 	}
 
 	responsesRR := httptest.NewRecorder()
-	responsesNonStreaming(responsesRR, strings.NewReader(completion), "fallback-model")
+	responsesNonStreaming(responsesRR, strings.NewReader(completion), "fallback-model", nil)
 	if responsesRR.Code != http.StatusOK {
 		t.Fatalf("responses status = %d, body = %s", responsesRR.Code, responsesRR.Body.String())
 	}

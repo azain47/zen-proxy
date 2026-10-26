@@ -50,11 +50,110 @@ func FetchModelMetadata(cfg Config) map[string]liteLLMModelMetadata {
 		return nil
 	}
 
+	var raw json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil
+	}
+
+	if hasNestedModels(raw) {
+		if catalog := decodeOpenCodeCatalog(raw); catalog != nil {
+			return catalog
+		}
+		return nil
+	}
+
 	var catalog map[string]liteLLMModelMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+	if err := json.Unmarshal(raw, &catalog); err != nil {
 		return nil
 	}
 	delete(catalog, "sample_spec")
+	return catalog
+}
+
+// hasNestedModels reports whether the payload uses the OpenCode catalog shape,
+// where every meaningful top-level entry is a provider object carrying a
+// "models" map. The LiteLLM catalog is flat: model ids are the top-level keys
+// and its entries never contain a "models" field, so the two shapes are
+// distinguishable.
+func hasNestedModels(raw json.RawMessage) bool {
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &topLevel); err != nil {
+		return false
+	}
+	for key, value := range topLevel {
+		if key == "sample_spec" {
+			continue
+		}
+		var entry struct {
+			Models json.RawMessage `json:"models"`
+		}
+		if err := json.Unmarshal(value, &entry); err != nil {
+			continue
+		}
+		if len(entry.Models) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// openCodeCatalogProvider is a top-level entry of models.opencode.ai/api.json,
+// keyed by provider id.
+type openCodeCatalogProvider struct {
+	Models map[string]openCodeCatalogModel `json:"models"`
+}
+
+// openCodeCatalogModel mirrors the per-model fields of the OpenCode catalog.
+type openCodeCatalogModel struct {
+	Limit struct {
+		Context int `json:"context"`
+		Output  int `json:"output"`
+	} `json:"limit"`
+	ToolCall   bool `json:"tool_call"`
+	Reasoning  bool `json:"reasoning"`
+	Modalities struct {
+		Input []string `json:"input"`
+	} `json:"modalities"`
+}
+
+// decodeOpenCodeCatalog flattens the provider-keyed OpenCode catalog into the
+// same map shape the LiteLLM parser produces. Keys are written both as the
+// bare model id and as "provider/id" so findModelMetadata's existing lookup
+// order can match either form.
+func decodeOpenCodeCatalog(raw json.RawMessage) map[string]liteLLMModelMetadata {
+	var topLevel map[string]openCodeCatalogProvider
+	if err := json.Unmarshal(raw, &topLevel); err != nil {
+		return nil
+	}
+
+	catalog := make(map[string]liteLLMModelMetadata)
+	for providerID, provider := range topLevel {
+		if len(provider.Models) == 0 {
+			continue
+		}
+		for modelID, model := range provider.Models {
+			functionCalling := model.ToolCall
+			reasoning := model.Reasoning
+			supportsVision := false
+			for _, modality := range model.Modalities.Input {
+				if modality == "image" {
+					supportsVision = true
+					break
+				}
+			}
+			metadata := liteLLMModelMetadata{
+				MaxInputTokens:          model.Limit.Context,
+				SupportsFunctionCalling: &functionCalling,
+				SupportsReasoning:       &reasoning,
+				SupportsVision:          &supportsVision,
+			}
+			catalog[modelID] = metadata
+			catalog[providerID+"/"+modelID] = metadata
+		}
+	}
+	if len(catalog) == 0 {
+		return nil
+	}
 	return catalog
 }
 

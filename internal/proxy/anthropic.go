@@ -25,7 +25,7 @@ func handleAnthropic(cfg Config) http.HandlerFunc {
 		stream := req.Stream
 		opts := anthropicChatRequestOptions(req)
 
-		resp, err := upstreamRequest(r.Context(), cfg, model, messages, stream, tools, opts)
+		resp, toolRenames, err := upstreamRequest(r.Context(), cfg, model, messages, stream, tools, opts)
 		if err != nil {
 			writeError(w, 502, "upstream error: "+err.Error())
 			return
@@ -39,10 +39,10 @@ func handleAnthropic(cfg Config) http.HandlerFunc {
 		}
 
 		if !stream {
-			anthropicNonStreaming(w, resp.Body, model)
+			anthropicNonStreaming(w, resp.Body, model, toolRenames)
 			return
 		}
-		anthropicStreaming(w, resp.Body, model)
+		anthropicStreaming(w, resp.Body, model, toolRenames)
 	}
 }
 
@@ -66,7 +66,7 @@ func handleTokenCount(cfg Config) http.HandlerFunc {
 	}
 }
 
-func anthropicNonStreaming(w http.ResponseWriter, body io.Reader, model string) {
+func anthropicNonStreaming(w http.ResponseWriter, body io.Reader, model string, toolRenames map[string]string) {
 	var completion ChatCompletion
 	if err := json.NewDecoder(body).Decode(&completion); err != nil {
 		writeError(w, 502, "failed to decode upstream response")
@@ -78,6 +78,7 @@ func anthropicNonStreaming(w http.ResponseWriter, body io.Reader, model string) 
 	}
 
 	msg := completion.Choices[0].Message
+	restoreToolCallNames(msg.ToolCalls, toolRenames)
 	content := buildAnthropicContent(msg)
 	stopReason := mapFinishReason(completion.Choices[0].FinishReason)
 
@@ -95,7 +96,7 @@ func anthropicNonStreaming(w http.ResponseWriter, body io.Reader, model string) 
 	json.NewEncoder(w).Encode(resp)
 }
 
-func anthropicStreaming(w http.ResponseWriter, body io.Reader, model string) {
+func anthropicStreaming(w http.ResponseWriter, body io.Reader, model string, toolRenames map[string]string) {
 	sseHeaders(w)
 
 	msgID := "msg_proxy"
@@ -207,6 +208,9 @@ func anthropicStreaming(w http.ResponseWriter, body io.Reader, model string) {
 			closeText()
 			closeThinking()
 			for _, tc := range delta.ToolCalls {
+				if tc.Function.Name != "" {
+					tc.Function.Name = restoreToolName(toolRenames, tc.Function.Name)
+				}
 				tb := toolBlocks[tc.Index]
 				if tb == nil {
 					id := tc.ID

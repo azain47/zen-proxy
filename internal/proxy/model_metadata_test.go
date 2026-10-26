@@ -1,9 +1,87 @@
 package proxy
 
-import "testing"
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+func TestHasNestedModelsDistinguishesCatalogShapes(t *testing.T) {
+	nested := []byte(`{"opencode":{"models":{"deepseek-v4.1-flash-free":{"limit":{"context":200000}}}}}`)
+	if !hasNestedModels(nested) {
+		t.Fatal("expected OpenCode catalog to be detected as nested")
+	}
+
+	flat := []byte(`{"gpt-5.4":{"max_input_tokens":1050000,"litellm_provider":"openai"}}`)
+	if hasNestedModels(flat) {
+		t.Fatal("expected LiteLLM catalog to be detected as flat")
+	}
+}
+
+func TestDecodeOpenCodeCatalogFlattensCapabilities(t *testing.T) {
+	payload := []byte(`{
+		"opencode": {
+			"id": "opencode",
+			"models": {
+				"deepseek-v4.1-flash-free": {
+					"tool_call": true,
+					"reasoning": true,
+					"limit": {"context": 200000, "output": 32000},
+					"modalities": {"input": ["text", "image"], "output": ["text"]}
+				}
+			}
+		},
+		"some-empty-provider": {"id": "some-empty-provider"}
+	}`)
+
+	catalog := decodeOpenCodeCatalog(payload)
+	if catalog == nil {
+		t.Fatal("catalog = nil, want flattened metadata")
+	}
+
+	for _, key := range []string{"deepseek-v4.1-flash-free", "opencode/deepseek-v4.1-flash-free"} {
+		metadata, ok := catalog[key]
+		if !ok {
+			t.Fatalf("missing key %q", key)
+		}
+		if metadata.MaxInputTokens != 200000 {
+			t.Fatalf("%q max input tokens = %d, want 200000", key, metadata.MaxInputTokens)
+		}
+		if !boolValue(metadata.SupportsFunctionCalling) || !boolValue(metadata.SupportsReasoning) {
+			t.Fatalf("%q function calling/reasoning metadata not applied: %#v", key, metadata)
+		}
+		if !boolValue(metadata.SupportsVision) {
+			t.Fatalf("%q vision metadata not applied: %#v", key, metadata)
+		}
+	}
+}
+
+func TestFetchModelMetadataParsesNestedOpenCodeCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"opencode":{"models":{"big-pickle":{"tool_call":true,"reasoning":false,"limit":{"context":128000},"modalities":{"input":["text"],"output":["text"]}}}}}`)
+	}))
+	defer server.Close()
+
+	catalog := FetchModelMetadata(Config{ModelMetadataURL: server.URL})
+	if catalog == nil {
+		t.Fatal("catalog = nil, want parsed metadata")
+	}
+	metadata, ok := catalog["opencode/big-pickle"]
+	if !ok {
+		t.Fatalf("missing key opencode/big-pickle: %#v", catalog)
+	}
+	if metadata.MaxInputTokens != 128000 {
+		t.Fatalf("max input tokens = %d, want 128000", metadata.MaxInputTokens)
+	}
+	if boolValue(metadata.SupportsReasoning) {
+		t.Fatal("reasoning = true, want false")
+	}
 }
 
 func TestEnrichModelsUsesLiteLLMCapabilities(t *testing.T) {

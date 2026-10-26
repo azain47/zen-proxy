@@ -19,6 +19,7 @@ type dashboardConfig struct {
 	Model      string
 	ModelCount int
 	NoColor    bool
+	Models     []ModelInfo
 }
 
 type traceUpdateMsg struct {
@@ -31,6 +32,47 @@ type clipboardResultMsg struct {
 	label string
 }
 type clearClipboardNoticeMsg struct{}
+
+// panelCount is the number of detail tabs the dashboard renders. Tab indices
+// are shared by panelLabels, panelTabAt, the number-key shortcut and
+// changePanel, so all navigation derives from the panelLabels length.
+func panelCount() int {
+	return len(panelLabels)
+}
+
+// panelLabels are the detail tab captions, ordered by panel index. Each tab
+// has a short, a medium and a long form; panelLabelForm picks the widest form
+// that still fits the detail column.
+var panelLabels = []panelLabelNames{
+	{"IN", "INBOUND", "INBOUND"},
+	{"UP", "UPSTREAM", "UPSTREAM"},
+	{"UP-RES", "UP-RES", "UPSTREAM RESPONSE"},
+	{"OUT", "CLIENT", "CLIENT"},
+}
+
+const (
+	tabFormShort = iota
+	tabFormMedium
+	tabFormLong
+)
+
+type panelLabelNames struct {
+	short  string
+	medium string
+	long   string
+}
+
+func (names panelLabelNames) form(form int) string {
+	switch form {
+	case tabFormLong:
+		return names.long
+	case tabFormMedium:
+		return names.medium
+	default:
+		return names.short
+	}
+}
+
 type dashboardModel struct {
 	config dashboardConfig
 	events <-chan RequestTrace
@@ -40,6 +82,7 @@ type dashboardModel struct {
 
 	selected   int
 	panel      int
+	showModels bool
 	scroll     int
 	horizontal int
 	noWrap     bool
@@ -171,9 +214,14 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tick()
 	case tea.KeyMsg:
 		m.notice = ""
+		if m.showModels {
+			return m.updateModelsKey(msg.String())
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "m":
+			m.setModelsView(true)
 		case "k", "p":
 			m.selectRequest(-1)
 		case "j", "n":
@@ -237,10 +285,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+tab", "[":
 			m.changePanel(-1)
 		case "1", "2", "3", "4":
-			m.panel = int(msg.String()[0] - '1')
-			m.scroll = 0
-			m.horizontal = 0
-			m.jsonCursor = ""
+			m.selectPanel(int(msg.String()[0] - '1'))
 		case "pgdown", "ctrl+d", "ctrl+f":
 			m.scroll += m.pageScrollStep()
 		case "pgup", "ctrl+u", "ctrl+b":
@@ -291,7 +336,18 @@ func (m *dashboardModel) selectRequest(delta int) {
 }
 
 func (m *dashboardModel) changePanel(delta int) {
-	m.panel = (m.panel + delta + 4) % 4
+	count := panelCount()
+	m.panel = (m.panel + delta + count) % count
+	m.scroll = 0
+	m.horizontal = 0
+	m.jsonCursor = ""
+}
+
+func (m *dashboardModel) selectPanel(index int) {
+	if index < 0 || index >= panelCount() {
+		return
+	}
+	m.panel = index
 	m.scroll = 0
 	m.horizontal = 0
 	m.jsonCursor = ""
@@ -312,13 +368,15 @@ func (m *dashboardModel) selectRequestIndex(index int) {
 // handleMouseClick maps an absolute terminal cell to the layout View() renders,
 // then dispatches the click to the request list or the detail panel tabs.
 func (m *dashboardModel) handleMouseClick(x, y int) {
-	if len(m.traces) == 0 {
-		return
-	}
 	bodyTop := lineCount(m.header())
 	bodyHeight := max(0, m.height-bodyTop-lineCount(m.footer()))
 	bodyRow := y - bodyTop
 	if bodyRow < 0 || bodyRow >= bodyHeight {
+		return
+	}
+	// The model catalogue is read-only: rows have no click action, and the
+	// request list and trace tabs are not on screen.
+	if m.showModels || len(m.traces) == 0 {
 		return
 	}
 	if m.mode() == dashboardTiny {
@@ -378,14 +436,41 @@ func (m *dashboardModel) handleDetailClick(contentX, contentRow, width int) {
 	m.toggleJSONNode()
 }
 
+// tabRowWidth is the rendered width of the tab row for the given label form.
+// panelTabs and panelTabAt compare against it so labels only grow to a form
+// that fits the detail column; a clipped row would hide tabs.
+func tabRowWidth(form int) int {
+	total := 0
+	for i := range panelLabels {
+		if i > 0 {
+			total++
+		}
+		total += len(fmt.Sprintf("%d:%s", i+1, panelLabels[i].form(form))) + 2
+	}
+	return total
+}
+
+// panelLabelForm returns the widest label form whose row fits width. ok is
+// false when even the short form overflows, in which case the tab row is
+// hidden instead of clipped.
+func panelLabelForm(width int) (int, bool) {
+	for _, form := range []int{tabFormLong, tabFormMedium, tabFormShort} {
+		if tabRowWidth(form) <= width {
+			return form, true
+		}
+	}
+	return tabFormShort, false
+}
+
 func panelTabAt(width, x int) (int, bool) {
-	labels := []string{"IN", "UP", "UP-RES", "OUT"}
-	if width >= 64 {
-		labels = []string{"INBOUND", "UPSTREAM", "UPSTREAM RESPONSE", "CLIENT"}
+	form, ok := panelLabelForm(width)
+	if !ok {
+		return 0, false
 	}
 	pos := 0
-	for i, label := range labels {
-		segment := len(fmt.Sprintf("%d:%s", i+1, label)) + 2
+	for i := range panelLabels {
+		text := fmt.Sprintf("%d:%s", i+1, panelLabels[i].form(form))
+		segment := len(text) + 2
 		if x >= pos && x < pos+segment {
 			return i, true
 		}
@@ -442,7 +527,9 @@ func (m dashboardModel) View() string {
 	}
 
 	var body string
-	if m.mode() == dashboardTiny {
+	if m.showModels {
+		body = m.modelsView(bodyHeight)
+	} else if m.mode() == dashboardTiny {
 		body = m.traceDetail(m.width, bodyHeight)
 	} else if m.width < 72 {
 		body = renderDashboardPanel(m.traceDetail(m.width-2, bodyHeight-2), m.width, bodyHeight)
@@ -461,6 +548,9 @@ func (m dashboardModel) View() string {
 }
 
 func (m dashboardModel) header() string {
+	if m.showModels {
+		return m.modelsHeader()
+	}
 	position := m.selectedPosition()
 	if m.mode() == dashboardTiny {
 		return accentStyle.Render(fitText(fmt.Sprintf("ZEN PROXY | %s | req %d/%d", m.config.Provider, position, len(m.traces)), m.width))
@@ -478,13 +568,15 @@ func (m dashboardModel) footer() string {
 		return accentStyle.Render(fitText(m.notice, m.width))
 	}
 	var help string
-	switch m.mode() {
-	case dashboardWide:
-		help = "j/k request | up/down tree | left/right fold | enter | w wrap | y node | c panel | Y all | drag copy | q"
-	case dashboardTiny:
-		help = "j/k request | up/down tree | enter | y node | Y all | q"
+	switch {
+	case m.showModels:
+		help = "m/esc back to traffic | j/k scroll | pgup/pgdn | c copy list | q"
+	case m.mode() == dashboardWide:
+		help = "m models | j/k request | up/down tree | left/right fold | enter | w wrap | y node | c panel | Y all | drag copy | q"
+	case m.mode() == dashboardTiny:
+		help = "m models | j/k request | up/down tree | enter | y node | Y all | q"
 	default:
-		help = "j/k request | up/down tree | fold | w wrap | y node | c panel | drag copy | q"
+		help = "m models | j/k request | up/down tree | fold | w wrap | y node | c panel | drag copy | q"
 	}
 	return mutedStyle.Render(fitText(help, m.width))
 }
@@ -761,17 +853,17 @@ func jsonStringEnd(line string, start int) int {
 }
 
 func panelTabs(active, width int) string {
-	labels := []string{"IN", "UP", "UP-RES", "OUT"}
-	if width >= 64 {
-		labels = []string{"INBOUND", "UPSTREAM", "UPSTREAM RESPONSE", "CLIENT"}
+	form, ok := panelLabelForm(width)
+	if !ok {
+		return ""
 	}
-	parts := make([]string, len(labels))
-	for i, label := range labels {
-		text := fmt.Sprintf("%d:%s", i+1, label)
+	parts := make([]string, 0, len(panelLabels))
+	for i := range panelLabels {
+		text := fmt.Sprintf("%d:%s", i+1, panelLabels[i].form(form))
 		if i == active {
-			parts[i] = accentStyle.Render("[" + text + "]")
+			parts = append(parts, accentStyle.Render("["+text+"]"))
 		} else {
-			parts[i] = mutedStyle.Render(" " + text + " ")
+			parts = append(parts, mutedStyle.Render(" "+text+" "))
 		}
 	}
 	return strings.Join(parts, " ")
@@ -813,7 +905,7 @@ func (m dashboardModel) detailDimensions() (int, int) {
 	if m.mode() == dashboardTiny {
 		return max(1, m.width), bodyHeight
 	}
-	if m.width < 72 {
+	if m.width < 72 || m.showModels {
 		return max(1, m.width-2), max(0, bodyHeight-2)
 	}
 	leftOuter := min(38, max(26, m.width/3))
@@ -823,11 +915,14 @@ func (m dashboardModel) detailDimensions() (int, int) {
 
 func (m dashboardModel) maxScroll() int {
 	width, height := m.detailDimensions()
+	if m.showModels {
+		return max(0, len(m.modelsViewLines(width))-height)
+	}
 	return max(0, len(m.traceDetailLines(width))-height)
 }
 
 func (m dashboardModel) maxHorizontalScroll() int {
-	if !m.noWrap || len(m.traces) == 0 || m.selected < 0 || m.selected >= len(m.traces) {
+	if m.showModels || !m.noWrap || len(m.traces) == 0 || m.selected < 0 || m.selected >= len(m.traces) {
 		return 0
 	}
 	payload, _ := tracePanel(m.traces[m.selected], m.panel)

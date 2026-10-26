@@ -133,6 +133,7 @@ func Run(version string) int {
 		Model:      cfg.Model,
 		ModelCount: len(models),
 		NoColor:    options.NoColor,
+		Models:     models,
 	}, cfg.Debugger); err != nil {
 		log.Printf("dashboard error: %v", err)
 	}

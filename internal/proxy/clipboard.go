@@ -53,6 +53,9 @@ func panelLabel(panel int) string {
 }
 
 func (m dashboardModel) panelMarkdown() (string, bool) {
+	if m.showModels {
+		return m.modelsMarkdown(), true
+	}
 	trace, ok := m.selectedTrace()
 	if !ok {
 		return "", false
@@ -64,6 +67,30 @@ func (m dashboardModel) panelMarkdown() (string, bool) {
 		return "", false
 	}
 	return markdown.String(), true
+}
+
+// modelsMarkdown renders the model catalogue as Markdown so copying from the
+// models view produces the list of models rather than a trace payload.
+func (m dashboardModel) modelsMarkdown() string {
+	free, paid := m.partitionModels()
+	var markdown strings.Builder
+	fmt.Fprintf(&markdown, "# Models (%d)\n\n", len(m.config.Models))
+	fmt.Fprintf(&markdown, "- Provider: `%s`\n", m.config.Provider)
+	fmt.Fprintf(&markdown, "- Default: `%s`\n\n", emptyAs(m.config.Model, "unavailable"))
+	write := func(title string, models []ModelInfo) {
+		fmt.Fprintf(&markdown, "## %s (%d)\n\n", title, len(models))
+		if len(models) == 0 {
+			markdown.WriteString("_none reported_\n\n")
+			return
+		}
+		for _, model := range models {
+			fmt.Fprintf(&markdown, "- `%s` — %s\n", model.ID, modelDetail(model))
+		}
+		markdown.WriteString("\n")
+	}
+	write("Free", free)
+	write("Other", paid)
+	return markdown.String()
 }
 
 func (m dashboardModel) traceMarkdown() (string, bool) {

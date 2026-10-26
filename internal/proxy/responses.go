@@ -26,7 +26,7 @@ func handleResponses(cfg Config) http.HandlerFunc {
 		stream := req.Stream
 		opts := responsesChatRequestOptions(req)
 
-		resp, err := upstreamRequest(r.Context(), cfg, model, messages, stream, tools, opts)
+		resp, toolRenames, err := upstreamRequest(r.Context(), cfg, model, messages, stream, tools, opts)
 		if err != nil {
 			writeError(w, 502, "upstream error: "+err.Error())
 			return
@@ -40,14 +40,14 @@ func handleResponses(cfg Config) http.HandlerFunc {
 		}
 
 		if !stream {
-			responsesNonStreaming(w, resp.Body, model)
+			responsesNonStreaming(w, resp.Body, model, toolRenames)
 			return
 		}
-		responsesStreaming(w, resp.Body, model)
+		responsesStreaming(w, resp.Body, model, toolRenames)
 	}
 }
 
-func responsesNonStreaming(w http.ResponseWriter, body io.Reader, model string) {
+func responsesNonStreaming(w http.ResponseWriter, body io.Reader, model string, toolRenames map[string]string) {
 	var completion ChatCompletion
 	if err := json.NewDecoder(body).Decode(&completion); err != nil {
 		writeError(w, 502, "failed to decode upstream response")
@@ -59,6 +59,7 @@ func responsesNonStreaming(w http.ResponseWriter, body io.Reader, model string) 
 	}
 
 	msg := completion.Choices[0].Message
+	restoreToolCallNames(msg.ToolCalls, toolRenames)
 	respID := "resp_" + completion.ID
 	msgID := "msg_" + completion.ID
 
@@ -114,7 +115,7 @@ func responsesNonStreaming(w http.ResponseWriter, body io.Reader, model string) 
 	json.NewEncoder(w).Encode(resp)
 }
 
-func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
+func responsesStreaming(w http.ResponseWriter, body io.Reader, model string, toolRenames map[string]string) {
 	sseHeaders(w)
 
 	respID := "resp_proxy"
@@ -343,6 +344,9 @@ func responsesStreaming(w http.ResponseWriter, body io.Reader, model string) {
 
 		if len(delta.ToolCalls) > 0 {
 			for _, tc := range delta.ToolCalls {
+				if tc.Function.Name != "" {
+					tc.Function.Name = restoreToolName(toolRenames, tc.Function.Name)
+				}
 				tool := startTool(tc.Index, tc)
 				if tc.Function.Name != "" && tool.Name != tc.Function.Name {
 					tool.Name += tc.Function.Name

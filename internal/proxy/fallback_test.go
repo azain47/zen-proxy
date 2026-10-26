@@ -3,7 +3,7 @@ package proxy
 import "testing"
 
 func TestResolveFallbackModelUsesCurrentZenModelWhenDefaultDisappears(t *testing.T) {
-	cfg := Config{Provider: providerZen, Model: "deepseek-v4-flash-free"}
+	cfg := Config{Provider: providerZen, Model: "deepseek-v4.1-flash-free"}
 	models := []ModelInfo{{ID: "current-zen-model"}}
 
 	if got := resolveFallbackModel(cfg, models); got != "current-zen-model" {

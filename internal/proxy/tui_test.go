@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -107,6 +108,58 @@ func TestDashboardScrollingUsesBoundedDetailOffset(t *testing.T) {
 	model = updateDashboard(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
 	if model.scroll != 0 {
 		t.Fatalf("panel switch scroll = %d, want 0", model.scroll)
+	}
+}
+
+func TestPanelTabsRendersEveryLabel(t *testing.T) {
+	for _, width := range []int{40, 64, 120} {
+		for active := range panelLabels {
+			rendered := panelTabs(active, width)
+			if strings.Contains(rendered, "\x00") {
+				t.Fatalf("width %d active %d rendered a NUL byte", width, active)
+			}
+			count := strings.Count(rendered, ":")
+			if count != len(panelLabels) {
+				t.Fatalf("width %d active %d rendered %d separators, want %d: %q",
+					width, active, count, len(panelLabels), rendered)
+			}
+		}
+	}
+}
+
+func TestPanelTabHitTestMatchesRenderedTabs(t *testing.T) {
+	for _, width := range []int{40, 64, 120} {
+		rendered := panelTabs(-1, width)
+		for index := range panelLabels {
+			x := strings.Index(rendered, fmt.Sprintf("%d:", index+1))
+			if x < 0 {
+				t.Fatalf("width %d: tab %d missing from %q", width, index+1, rendered)
+			}
+			got, ok := panelTabAt(width, x+1)
+			if !ok || got != index {
+				t.Fatalf("width %d: click at x=%d hit (%d,%v), want (%d,true)", width, x+1, got, ok, index)
+			}
+		}
+	}
+}
+
+func TestChangePanelWrapsAcrossAllPanels(t *testing.T) {
+	model := dashboardModel{width: 100, height: 30}
+	seen := map[int]bool{}
+	for i := 0; i < panelCount(); i++ {
+		seen[model.panel] = true
+		model.changePanel(1)
+	}
+	if len(seen) != panelCount() {
+		t.Fatalf("visited %d distinct panels, want %d: %v", len(seen), panelCount(), seen)
+	}
+	if model.panel != 0 {
+		t.Fatalf("panel after full cycle = %d, want 0", model.panel)
+	}
+	model.panel = 0
+	model.changePanel(-1)
+	if model.panel != panelCount()-1 {
+		t.Fatalf("panel after backward wrap = %d, want %d", model.panel, panelCount()-1)
 	}
 }
 
